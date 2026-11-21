@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AllMapToUSD — AGV/AMR Map to Isaac Sim USD &amp; Layout Inspector</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+<div class="app">
+  <!-- Collapsible & Resizable Left Sidebar -->
+  <aside class="sidebar-shell" id="sidebarShell">
+    <div class="sidebar-inner" id="sidebarInner">
+    <div class="sidebar-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title">AllMapToUSD</div>
+          <div class="brand-sub">AGV/AMR Layout → OpenUSD</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-scroll">
+      <!-- Map Source -->
+      <section class="acc open server-only" id="accSource">
+        <button class="acc-head" onclick="toggleAcc('accSource')">
+          <span class="acc-title">Map Source</span>
+          <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+        </button>
+        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+          <div class="field">
+            <span class="field-label">Map Format / Controller</span>
+            <select id="mapFormat" onchange="onMapFormatChange()">
+              <option value="auto" selected>Auto Detect</option>
+              <option value="seer_smap">SEER Robotics (.smap)</option>
+              <option value="ros_occupancy">ROS / Nav2 (.yaml + .pgm/.png / .zip)</option>
+              <option value="dxf_cad">CAD / SICK SMET (.dxf)</option>
+              <option value="raster_image">Image Floorplan / SICK Export (.png/.pgm/.bmp)</option>
+            </select>
+          </div>
+          <div class="field" id="dxfUnitsField" style="display:none;">
+            <span class="field-label">DXF Drawing Units</span>
+            <select id="dxfUnits">
+              <option value="auto" selected>Auto (from DXF header)</option>
+              <option value="m">Meters (m)</option>
+              <option value="mm">Millimeters (mm)</option>
+              <option value="cm">Centimeters (cm)</option>
+            </select>
+          </div>
+          <div class="field" id="imageResField" style="display:none;">
+            <span class="field-label">Image Resolution (m/px)</span>
+            <div class="stepper">
+              <button onclick="stepInput('imageRes', -0.01, 3)">−</button>
+              <input id="imageRes" type="number" step="0.01" min="0.005" max="2.0" value="0.050" />
+              <button onclick="stepInput('imageRes', 0.01, 3)">+</button>
+            </div>
+          </div>
+          <div id="dropzone" class="dropzone">
+            <div class="dropzone-icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <strong>Drop or click to select map files</strong>
+            <small>SEER <code>.smap</code>, ROS <code>.yaml+.pgm</code>, CAD/SICK <code>.dxf</code>, or <code>.png</code></small>
+            <input id="fileInput" type="file" multiple accept=".smap,.json,.yaml,.yml,.pgm,.png,.bmp,.jpg,.jpeg,.dxf,.zip" style="display:none" />
+          </div>
+          <button class="btn secondary" onclick="loadSample('ros_factory')" title="Realistic noisy LiDAR SLAM occupancy grid with tilted racks, L-machine, and round pillars">Sample: ROS.yaml</button>
+        </div></div></div>
+      </section>
+
+      <!-- Reconstruction & USD Params -->
+      <section class="acc server-only" id="accBuild">
+        <button class="acc-head" onclick="toggleAcc('accBuild')">
+          <span class="acc-title">Obstacle &amp; USD Parameters</span>
+          <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+        </button>
+        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+          <div class="field">
+            <span class="field-label">Reconstruction Mode</span>
+            <select id="reconMode">
+              <option value="contour_polygon" selected>Contour Polygon (Recommended)</option>
+              <option value="aabb">Axis-Aligned Grid Merge (AABB)</option>
+            </select>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <span class="field-label">Grid Resolution (m)</span>
+              <div class="stepper">
+                <button onclick="stepInput('gridRes', -0.01, 2)">−</button>
+                <input id="gridRes" type="number" step="0.01" min="0.01" max="1.0" value="0.05" />
+                <button onclick="stepInput('gridRes', 0.01, 2)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Wall Height (m)</span>
+              <div class="stepper">
+                <button onclick="stepInput('wallHeight', -0.2, 1)">−</button>
+                <input id="wallHeight" type="number" step="0.1" min="0.1" max="20" value="2.5" />
+                <button onclick="stepInput('wallHeight', 0.2, 1)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Simplify Tolerance ε (m)</span>
+              <div class="stepper" title="Lower values preserve finer curves and protrusions; higher values reduce vertex count">
+                <button onclick="stepInput('contourTol', -0.01, 2)">−</button>
+                <input id="contourTol" type="number" step="0.01" min="0.01" max="0.50" value="0.04" />
+                <button onclick="stepInput('contourTol', 0.01, 2)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Noise Filter (cells)</span>
+              <div class="stepper" title="Remove isolated point clusters smaller than this cell count">
+                <button onclick="stepInput('minCluster', -1, 0)">−</button>
+                <input id="minCluster" type="number" step="1" min="1" max="100" value="3" />
+                <button onclick="stepInput('minCluster', 1, 0)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Morph Close (cells)</span>
+              <div class="stepper">
+                <button onclick="stepInput('morphClose', -1, 0)">−</button>
+                <input id="morphClose" type="number" step="1" min="0" max="5" value="2" />
+                <button onclick="stepInput('morphClose', 1, 0)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Safety Dilate (cells)</span>
+              <div class="stepper">
+                <button onclick="stepInput('dilateCells', -1, 0)">−</button>
+                <input id="dilateCells" type="number" step="1" min="0" max="5" value="0" />
+                <button onclick="stepInput('dilateCells', 1, 0)">+</button>
+              </div>
+            </div>
+          </div>
+          <div class="grid-2" style="align-items:end;">
+            <div class="field">
+              <span class="field-label">Forbidden Height (m)</span>
+              <div class="stepper">
+                <button onclick="stepInput('forbiddenHeight', -0.2, 1)">−</button>
+                <input id="forbiddenHeight" type="number" step="0.1" min="0.1" max="20" value="1.2" />
+                <button onclick="stepInput('forbiddenHeight', 0.2, 1)">+</button>
+              </div>
+            </div>
+            <label class="switch-row" title="Treat forbidden zones as physical collision walls">
+              <span>Zone Collision</span>
+              <span class="switch">
+                <input id="forbiddenCollision" type="checkbox" checked onchange="render()" />
+                <span class="slider"></span>
+              </span>
+            </label>
+          </div>
+          <div class="grid-2" style="align-items:end;">
+            <label class="switch-row" title="Automatically fill enclosed laser-scanned racks and pillars into solid volumes">
+              <span>Fill Solid Loops</span>
+              <span class="switch">
+                <input id="fillSolid" type="checkbox" checked />
+                <span class="slider"></span>
+              </span>
+            </label>
+            <div class="field">
+              <span class="field-label">Max Fill Area (m²)</span>
+              <div class="stepper">
+                <button onclick="stepInput('solidMaxArea', -5, 0)">−</button>
+                <input id="solidMaxArea" type="number" step="5" min="1" max="500" value="30" />
+                <button onclick="stepInput('solidMaxArea', 5, 0)">+</button>
+              </div>
+            </div>
+          </div>
+          <label class="switch-row" id="sealUnknownField" style="display:none;" title="Occupancy grids: unknown cells bordering free space (and free cells on the map edge) become walls, closing open SLAM frontiers in the preview, export and Isaac push">
+            <span>Seal Unknown Boundary <span class="field-val" id="frontierCount">0</span></span>
+            <span class="switch">
+              <input id="sealUnknown" type="checkbox" onchange="rebuildMap()" />
+              <span class="slider"></span>
+            </span>
+          </label>
+          <div class="field" id="layerField" style="display:none;">
+            <span class="field-label" title="Toggle a layer to include/exclude it; set a height (m) or leave blank to use Wall Height">
+              <span>CAD Layers · Height (m)</span>
+              <span class="field-val" id="layerCount">0</span>
+            </span>
+            <div class="layer-list" id="layerList"></div>
+          </div>
+          <button class="btn" id="rebuildBtn" onclick="rebuildMap()" disabled>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            Rebuild Obstacles
+          </button>
+        </div></div></div>
+      </section>
+
+      <!-- AGV Collision Proxy -->
+      <section class="acc" id="accAgv">
+        <button class="acc-head" onclick="toggleAcc('accAgv')">
+          <span class="acc-title">AGV Footprint Collision Check</span>
+          <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+        </button>
+        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+          <div id="collisionStatus" class="status-banner idle">
+            <span class="status-left"><span class="status-dot"></span><span id="collisionLabel">Waiting for map</span></span>
+            <span class="status-val" id="clearanceText">--</span>
+          </div>
+          <div class="grid-3">
+            <div class="field">
+              <span class="field-label">Length L (m)</span>
+              <div class="stepper">
+                <button onclick="stepInput('agvL', -0.1, 2, onAgvInput)">−</button>
+                <input id="agvL" type="number" step="0.05" min="0.1" max="10" value="1.20" oninput="onAgvInput()" />
+                <button onclick="stepInput('agvL', 0.1, 2, onAgvInput)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Width W (m)</span>
+              <div class="stepper">
+                <button onclick="stepInput('agvW', -0.1, 2, onAgvInput)">−</button>
+                <input id="agvW" type="number" step="0.05" min="0.1" max="10" value="0.80" oninput="onAgvInput()" />
+                <button onclick="stepInput('agvW', 0.1, 2, onAgvInput)">+</button>
+              </div>
+            </div>
+            <div class="field">
+              <span class="field-label">Height H (m)</span>
+              <div class="stepper">
+                <button onclick="stepInput('agvH', -0.1, 2, onAgvInput)">−</button>
+                <input id="agvH" type="number" step="0.05" min="0.1" max="5" value="0.60" oninput="onAgvInput()" />
+                <button onclick="stepInput('agvH', 0.1, 2, onAgvInput)">+</button>
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">Safety Margin (m)</span>
+            <div class="stepper" title="Clearance below this distance is flagged as TOO CLOSE">
+              <button onclick="stepInput('agvMargin', -0.05, 2, onAgvInput)">−</button>
+              <input id="agvMargin" type="number" step="0.05" min="0" max="2" value="0.10" oninput="onAgvInput()" />
+              <button onclick="stepInput('agvMargin', 0.05, 2, onAgvInput)">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label">
+              <span>Heading Yaw (deg)</span>
+              <span class="field-val" id="yawLabel">0°</span>
+            </span>
+            <input id="agvYaw" type="range" min="-180" max="180" step="1" value="0" oninput="onAgvInput()" />
+            <div class="preset-chips">
+              <button class="chip" onclick="setAgvYaw(0)">0°</button>
+              <button class="chip" onclick="setAgvYaw(90)">90°</button>
+              <button class="chip" onclick="setAgvYaw(180)">180°</button>
+              <button class="chip" onclick="setAgvYaw(-90)">-90°</button>
+            </div>
+          </div>
+          <div class="grid-2">
+            <button class="btn" onclick="resetAgvToCenter()">Reset Center</button>
+            <button class="btn" onclick="rotateAgv(45)">Rotate +45°</button>
+          </div>
+        </div></div></div>
+      </section>
+
+      <!-- Export -->
+      <section class="acc server-only" id="accExport">
+        <button class="acc-head" onclick="toggleAcc('accExport')">
+          <span class="acc-title">Export USD Template</span>
+          <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+        </button>
+        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+          <div class="field" title="USD coordinates are re-expressed relative to this origin and heading">
+            <span class="field-label">USD Origin (map coords)</span>
+            <div class="grid-3">
+              <div class="stepper">
+                <span class="unit" style="padding:0 0 0 7px;">X</span>
+                <input id="originX" type="number" step="0.1" value="0.000" />
+              </div>
+              <div class="stepper">
+                <span class="unit" style="padding:0 0 0 7px;">Y</span>
+                <input id="originY" type="number" step="0.1" value="0.000" />
+              </div>
+              <div class="stepper">
+                <span class="unit" style="padding:0 0 0 7px;">∠</span>
+                <input id="originYaw" type="number" step="1" min="-360" max="360" value="0" />
+                <span class="unit">°</span>
+              </div>
+            </div>
+            <div class="preset-chips">
+              <button class="chip" onclick="setOrigin('center')">Map Center</button>
+              <button class="chip" onclick="setOrigin('agv')">AGV Pose</button>
+              <button class="chip" onclick="setOrigin('reset')">Reset</button>
+            </div>
+          </div>
+          <label class="switch-row" title="Export stations and route paths as non-colliding USD markers">
+            <span>Stations &amp; Paths</span>
+            <span class="switch">
+              <input id="includeNav" type="checkbox" checked />
+              <span class="slider"></span>
+            </span>
+          </label>
+          <label class="switch-row" title="Export the AGV footprint as a parametric /World/TestVehicle proxy (visual only, no collision)">
+            <span>AGV Proxy Model</span>
+            <span class="switch">
+              <input id="includeAgv" type="checkbox" checked />
+              <span class="slider"></span>
+            </span>
+          </label>
+          <div class="grid-2">
+            <button class="btn primary" id="exportUsdBtn" onclick="exportUsd('usd')" disabled>Export .usd</button>
+            <button class="btn secondary" id="exportUsdaBtn" onclick="exportUsd('usda')" disabled>Export .usda</button>
+          </div>
+          <div id="exportStatus" style="font-size:11px;color:var(--text-muted);font-family:var(--mono);line-height:1.4;word-break:break-all;">
+            Output Dir: D:\Code\AllMapToUSD\exports\
+          </div>
+        </div></div></div>
+      </section>
+
+      <!-- Isaac Sim Live Push -->
+      <section class="acc server-only" id="accIsaac">
+        <button class="acc-head" onclick="toggleAcc('accIsaac')">
+          <span class="acc-title">Push to Isaac Sim (Live Stage)</span>
+          <span class="acc-right"><span style="color:var(--ok);font-size:10px;font-weight:700;">LIVE</span><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+        </button>
+        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+          <div class="row">
+            <div class="field" style="flex:2">
+              <span class="field-label">Isaac Sim Host IP</span>
+              <input id="isaacHost" type="text" value="127.0.0.1" />
+            </div>
+            <div class="field">
+              <span class="field-label">Port</span>
+              <div class="stepper">
+                <input id="isaacPort" type="number" value="8226" />
+              </div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <span class="field-label">Stage Mode</span>
+              <select id="isaacPushMode">
+                <option value="reference">Reference in Current USD</option>
+                <option value="open_stage">Open as New Stage</option>
+              </select>
+            </div>
+            <div class="field">
+              <span class="field-label">Target Prim Path</span>
+              <input id="isaacPrim" type="text" value="/World/AGV_Map" />
+            </div>
+          </div>
+          <div class="grid-2">
+            <button class="btn" id="testIsaacBtn" onclick="testIsaac()">Test Connection</button>
+            <button class="btn primary" id="pushIsaacBtn" onclick="pushToIsaac()" disabled>Push to Isaac Sim</button>
+          </div>
+          <div id="isaacStatus" style="font-size:11px;color:var(--text-muted);font-family:var(--mono);line-height:1.45;word-break:break-word;"></div>
+        </div></div></div>
+      </section>
+    </div>
+    </div>
+
+    <div class="resize-handle" id="resizeHandle" title="Drag to resize sidebar"></div>
+  </aside>
+
+  <!-- Main CAD Viewport -->
+  <main class="viewport">
+    <div class="toolbar">
+      <button class="btn icon-only" id="expandSidebarBtn" onclick="toggleSidebar()" title="Toggle Sidebar (Shortcut: B)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>
+        </svg>
+      </button>
+      <div class="sep"></div>
+      <button class="btn" onclick="fitToView()" title="Fit to View (Shortcut: F)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        Fit View
+      </button>
+      <button class="btn icon-only" onclick="zoomBy(1.25)" title="Zoom In (+)">+</button>
+      <button class="btn icon-only" onclick="zoomBy(0.8)" title="Zoom Out (-)">−</button>
+      <button class="btn" id="rulerBtn" onclick="toggleRuler()" title="Ruler Measurement (Shortcut: R)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.4 2.4 0 0 1 0-3.4l2.6-2.6a2.4 2.4 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/></svg>
+        Ruler
+      </button>
+      <div class="sep"></div>
+      <label class="layer-pill"><input id="layerBoxes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#94a3b8"></span>Obstacles</label>
+      <label class="layer-pill"><input id="layerPoints" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#38bdf8"></span>Raw Points</label>
+      <label class="layer-pill"><input id="layerForbidden" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#ef4444"></span>Forbidden</label>
+      <label class="layer-pill"><input id="layerRoutes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#22d3ee"></span>Routes</label>
+      <label class="layer-pill"><input id="layerGrid" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#64748b"></span>Grid</label>
+      <label class="layer-pill"><input id="layerAgv" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#22c55e"></span>AGV Box</label>
+      <div class="spacer"></div>
+      <div class="meta-bar" id="metaSummary">No map loaded</div>
+    </div>
+
+    <div class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+
+      <!-- Empty State Card -->
+      <div class="empty-overlay" id="emptyOverlay">
+        <div class="empty-card">
+          <div style="color:var(--accent);">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <h3>Load an AGV / AMR Map to Begin</h3>
+          <p>Supports SEER <code>.smap</code>, ROS <code>.yaml + .pgm/.png</code>, CAD / SICK SMET <code>.dxf</code>, and image floorplans.<br/>Measure aisle clearances, test AGV collisions, and export or push directly to Isaac Sim.</p>
+          <div class="server-only">
+            <button class="btn primary" style="width:100%" onclick="loadSample('ros_factory')">Load Sample: ROS.yaml</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="hud-bottom-left">
+        <span>Cursor <strong id="cursorCoord">(0.00, 0.00) m</strong></span>
+        <span style="opacity:0.35">|</span>
+        <span>AGV <strong id="agvCoord">(0.00, 0.00, 0°)</strong></span>
+        <span style="opacity:0.35">|</span>
+        <span><kbd>Q</kbd><kbd>E</kbd> Rotate · <kbd>R</kbd> Ruler · <kbd>F</kbd> Fit · <kbd>B</kbd> Sidebar</span>
+      </div>
+
+      <div class="hud-bottom-right">
+        <div class="scale-bar-box">
+          <span class="scale-label" id="scaleLabel">1 m</span>
+          <div class="scale-line" id="scaleLine" style="width: 60px;"></div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast"></div>
+    </div>
+  </main>
+</div>
+
+<!-- Load order matters: later files use functions and state from earlier ones. -->
+<script defer src="/static/js/core.js"></script>
+<script defer src="/static/js/collision.js"></script>
+<script defer src="/static/js/render.js"></script>
+<script defer src="/static/js/controls.js"></script>
+<script defer src="/static/js/api.js"></script>
+<script defer src="/static/js/main.js"></script>
+</body>
+</html>

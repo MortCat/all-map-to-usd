@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+exports/
+isaac_config.json
+dist/
+build/
+*.egg-info/
+setup.log
+app.log

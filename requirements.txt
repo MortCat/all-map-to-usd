@@ -1,0 +1,3 @@
+# Single source of truth for dependencies is pyproject.toml.
+# Installs the package in editable mode with the desktop window and dev/test tools.
+-e .[desktop,dev]
