@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from pxr import Sdf, Usd, UsdPhysics
 
 from allmaptousd.geometry.editing import MapStroke
-from allmaptousd.models import BuildConfig, CanonicalMap, as_points
+from allmaptousd.models import BuildConfig, CanonicalMap, VehicleProxyConfig, as_points
 from allmaptousd.pipeline import MapSession
 from allmaptousd.web import server
 
@@ -70,7 +70,7 @@ class MapEditingTests(unittest.TestCase):
             edited = server.apply_map_edits(request)
             self.assertTrue(covers(edited["obstacle_boxes"], 1.025, 1.025))
             self.assertTrue(covers(edited["obstacle_boxes"], 2.025, 2.5))
-            self.assertFalse(covers(edited["obstacle_boxes"], 2.5, 2.5))
+            self.assertTrue(covers(edited["obstacle_boxes"], 2.5, 2.5))
             self.assertTrue(covers(edited["obstacle_boxes"], 6, 6))
             with self.assertRaises(HTTPException) as error:
                 server.apply_map_edits(request)
@@ -79,6 +79,9 @@ class MapEditingTests(unittest.TestCase):
             rebuilt = server.rebuild_map(BuildConfig(grid_resolution=0.1), edited["edit_revision"])
             self.assertEqual(rebuilt["obstacle_boxes"], edited["obstacle_boxes"])
             self.assertEqual(rebuilt["bounds"], initial["bounds"])
+            outlines = server.rebuild_map(BuildConfig(fill_solid_obstacles=False), edited["edit_revision"])
+            self.assertFalse(covers(outlines["obstacle_boxes"], 2.5, 2.5))
+            self.assertTrue(covers(outlines["obstacle_boxes"], 6, 6))
             layer = Sdf.Layer.CreateAnonymous()
             self.assertTrue(layer.ImportFromString(state.session.export_bytes(".usda").decode()))
             stage = Usd.Stage.Open(layer)
@@ -106,6 +109,81 @@ class MapEditingTests(unittest.TestCase):
             self.assertLess(len(built.points), len(raw.points))
             self.assertEqual(built.layer_names, ["Walls"])
         self.assertEqual(len(raw.points), len(xs))
+
+    def test_drawn_loop_fills_up_to_limit_without_resealing_erased_gaps(self) -> None:
+        session = MapSession()
+        config = BuildConfig(grid_resolution=0.1, solid_fill_max_area_m2=8.41)
+        session.use(CanonicalMap(), config=config)
+        boundary = [(1.05, 1.05), (4.05, 1.05), (4.05, 4.05), (1.05, 4.05), (1.05, 1.05)]
+        strokes = [MapStroke(tool="line", width=0.1, points=[a, b]) for a, b in zip(boundary, boundary[1:])]
+        built = session.apply_edits(strokes, config)
+        self.assertTrue(covers(built.obstacle_boxes, 2, 2))
+        self.assertFalse(any(np.allclose(point, [2.05, 2.05]) for point in built.drawn_points))
+
+        smaller = session.rebuild(config.model_copy(update={"solid_fill_max_area_m2": 8.4}))
+        self.assertFalse(covers(smaller.obstacle_boxes, 2, 2))
+        disabled = session.rebuild(config.model_copy(update={"fill_solid_obstacles": False}))
+        self.assertFalse(covers(disabled.obstacle_boxes, 2, 2))
+
+        interior = MapStroke(tool="eraser", width=0.1, points=[(2.05, 2.05)])
+        erased = session.apply_edits([interior], config)
+        self.assertFalse(covers(erased.obstacle_boxes, 2.05, 2.05))
+        self.assertTrue(covers(erased.obstacle_boxes, 3, 3))
+        cut = MapStroke(tool="eraser", width=0.1, points=[(2.05, 1.05)])
+        opened = session.apply_edits([cut], config)
+        self.assertFalse(covers(opened.obstacle_boxes, 3, 3))
+        self.assertTrue(covers(opened.obstacle_boxes, 1.05, 2.05))
+        self.assertTrue(covers(session.step_edit_history(redo=False, config=config).obstacle_boxes, 3, 3))
+
+    def test_drawn_line_closes_imported_cad_walls_and_retains_layer_heights(self) -> None:
+        raw = CanonicalMap(
+            segments=as_points([
+                [(1.05, 1.05), (1.05, 4.05)],
+                [(1.05, 4.05), (4.05, 4.05)],
+                [(4.05, 4.05), (4.05, 1.05)],
+            ], (2, 2)),
+            segment_layers=np.zeros(3, dtype=int),
+            layer_names=["Walls"],
+        )
+        config = BuildConfig(
+            reconstruction_mode="aabb", grid_resolution=0.1, morph_close_cells=0,
+            layer_heights={"Walls": 1.4}, solid_fill_max_area_m2=12,
+        )
+        session = MapSession()
+        original = session.use(raw, config=config)
+        self.assertFalse(covers(original.obstacle_boxes, 2.5, 2.5))
+
+        line = MapStroke(tool="line", width=0.1, points=[(1.05, 1.05), (4.05, 1.05)])
+        closed = session.apply_edits([line], config)
+        self.assertTrue(covers(closed.obstacle_boxes, 2.5, 2.5))
+        imported = np.asarray(closed.obstacle_box_heights) == 1.4
+        self.assertTrue(covers(closed.obstacle_boxes[imported], 1.05, 3))
+
+        excluded = session.rebuild(config.model_copy(update={"excluded_layers": ["Walls"]}))
+        self.assertFalse(covers(excluded.obstacle_boxes, 2.5, 2.5))
+        cut = MapStroke(tool="eraser", width=0.5, points=[(2.55, 1.05)])
+        opened = session.apply_edits([cut], config)
+        self.assertFalse(covers(opened.obstacle_boxes, 2.5, 2.5))
+        self.assertTrue(covers(session.step_edit_history(redo=False, config=config).obstacle_boxes, 2.5, 2.5))
+
+    def test_narrow_mouth_uses_vehicle_span_and_keeps_wide_entrance_open(self) -> None:
+        config = BuildConfig(grid_resolution=0.05)
+        for gap, expect_fill in ((0.20, True), (1.20, False)):
+            with self.subTest(gap=gap):
+                session = MapSession()
+                session.use(CanonicalMap(), config=config)
+                points = [
+                    (2 - gap / 2, 4), (0, 4), (0, 0), (4, 0), (4, 4), (2 + gap / 2, 4),
+                ]
+                stroke = MapStroke(tool="brush", width=0.05, points=points)
+                self.assertEqual(covers(session.apply_edits([stroke], config).obstacle_boxes, 2, 2), expect_fill)
+                narrow_agv = config.model_copy(update={"vehicle_proxy": VehicleProxyConfig(width=0.10)})
+                self.assertFalse(covers(session.rebuild(narrow_agv).obstacle_boxes, 2, 2))
+                limited = config.model_copy(update={"solid_fill_max_area_m2": 10})
+                self.assertFalse(covers(session.rebuild(limited).obstacle_boxes, 2, 2))
+                if expect_fill:
+                    cut = MapStroke(tool="eraser", width=0.25, points=[(2, 4)])
+                    self.assertFalse(covers(session.apply_edits([cut], config).obstacle_boxes, 2, 2))
 
     def test_failed_edit_keeps_previous_map_and_revision(self) -> None:
         session = MapSession()

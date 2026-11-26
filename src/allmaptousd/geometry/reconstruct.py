@@ -13,15 +13,22 @@ All raster operations (morphology, connected components, cavity filling) run in 
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import cv2
 import numpy as np
 
-from allmaptousd.geometry.editing import DRAW, ERASE, EditRaster
+from allmaptousd.geometry.editing import DRAW, ERASE, MAX_EDIT_CELLS, EditRaster
 from allmaptousd.models import BuildConfig, CanonicalMap, as_points
 
 _AREA = cv2.CC_STAT_AREA
 _MAX_SPLIT_DEPTH = 6
+
+
+class OccupancyGrid(NamedTuple):
+    cells: np.ndarray
+    origin: np.ndarray
+    resolution: float
 
 
 def _square_kernel(radius: int) -> np.ndarray:
@@ -51,27 +58,33 @@ def _filter_small_clusters(grid: np.ndarray, min_cells: int) -> np.ndarray:
     return keep[labels].astype(np.uint8)
 
 
-def _fill_enclosed_solid_obstacles(grid: np.ndarray, res: float, max_area_m2: float) -> np.ndarray:
-    """Fill enclosed empty cavities (e.g. hollow laser-scanned racks/pillars) into solid blocks.
-
-    A dilate-only barrier (~0.22 m radius => bridges up to ~0.44 m LiDAR dropout gaps) is used
-    strictly for cavity detection; each cavity is then grown back by the same radius so it fills
-    up to the original laser perimeter without bloating outside.
-    """
-    if min(grid.shape) < 3:
-        return grid
-    seal_radius = max(2, min(8, int(round(0.22 / max(res, 1e-3)))))
-    free = (_dilate(grid, seal_radius) == 0).astype(np.uint8)
+def _enclosed_cells(
+    barrier: np.ndarray, max_cells: int, *, edited_boundary: np.ndarray | None = None,
+) -> np.ndarray:
+    free = (barrier == 0).astype(np.uint8)
     _, labels, stats, _ = cv2.connectedComponentsWithStats(free, connectivity=4)
-
-    max_cells = max(1, int(math.floor(max_area_m2 / (res * res))))
     is_cavity = stats[:, _AREA] <= max_cells
     is_cavity[0] = False  # label 0 = sealed/occupied cells
     border = np.concatenate((labels[0], labels[-1], labels[:, 0], labels[:, -1]))
     is_cavity[np.unique(border)] = False  # connected to the outside world
-    if not is_cavity.any():
+    if edited_boundary is not None:
+        touches_edit = np.zeros_like(is_cavity)
+        touches_edit[labels[_dilate(edited_boundary, 1) != 0]] = True
+        is_cavity &= touches_edit
+    return is_cavity[labels].astype(np.uint8)
+
+
+def _scan_seal_radius(res: float) -> int:
+    return max(2, min(8, round(0.22 / max(res, 1e-3))))
+
+
+def _fill_enclosed_solid_obstacles(grid: np.ndarray, res: float, max_area_m2: float) -> np.ndarray:
+    """Detect scan cavities across small dropouts and grow the fill to the original perimeter."""
+    if min(grid.shape) < 3:
         return grid
-    return grid | _dilate(is_cavity[labels].astype(np.uint8), seal_radius)
+    seal_radius = _scan_seal_radius(res)
+    cavities = _enclosed_cells(_dilate(grid, seal_radius), max(1, math.floor(max_area_m2 / (res * res))))
+    return grid | _dilate(cavities, seal_radius) if cavities.any() else grid
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +270,7 @@ def _height_groups(canonical: CanonicalMap, config: BuildConfig) -> list[tuple[f
 
 def _reconstruct_points(
     pts: np.ndarray, config: BuildConfig, edits: EditRaster | None,
+    source_grids: list[OccupancyGrid] | None = None,
 ) -> tuple[list[np.ndarray], np.ndarray, float]:
     """Rasterize one point group and rebuild it as (polygons, boxes, effective_resolution)."""
     res = float(config.grid_resolution)
@@ -310,6 +324,10 @@ def _reconstruct_points(
                 grid[affected_cells] = 0
             exact_grid[er, ec] = 0
 
+    if source_grids is not None and (grid.any() or exact_grid.any()):
+        occupied = grid if exact_grid is grid else grid | exact_grid
+        source_grids.append(OccupancyGrid(occupied, np.array([min_x, min_y]), res))
+
     if config.reconstruction_mode == "contour_polygon":
         polys = _reconstruct_contour_polygons(
             grid, float(min_x), float(min_y), res, float(config.contour_simplify_tol)
@@ -334,6 +352,114 @@ def _grid_boxes(grid: np.ndarray, min_x: float, min_y: float, res: float) -> np.
     )
 
 
+def _project_grid(source: OccupancyGrid, origin: np.ndarray, res: float, shape: tuple[int, int]) -> np.ndarray:
+    """Align grid centers to the joint grid, retaining thin occupied cells when downsampling."""
+    scale = source.resolution / res
+    offset = (source.origin - origin) / res
+    shift = offset + (scale - 1) / 2
+    transform = np.array([[scale, 0, shift[0]], [0, scale, shift[1]]])
+    rows, cols = shape
+    projected = cv2.warpAffine(source.cells, transform, (cols, rows), flags=cv2.INTER_NEAREST)
+    if scale < 1:
+        y, x = np.nonzero(source.cells)
+        xx = np.floor(offset[0] + (x + 0.5) * scale + 1e-7).astype(int).clip(0, cols - 1)
+        yy = np.floor(offset[1] + (y + 0.5) * scale + 1e-7).astype(int).clip(0, rows - 1)
+        projected[yy, xx] = 1
+    return projected
+
+
+def _fill_narrow_pockets(
+    occupied: np.ndarray, erased: np.ndarray, res: float, max_cells: int, vehicle_span: float,
+    *, edited_boundary: np.ndarray | None = None,
+) -> np.ndarray:
+    """Fill small pockets separated from outside by a gap too narrow for the AGV."""
+    fill = np.zeros_like(occupied)
+    if not math.isfinite(vehicle_span) or vehicle_span <= res:
+        return fill
+    half_span = vehicle_span / (2 * res)
+    if min(occupied.shape) < 2 * half_span:
+        return fill
+    radius = math.ceil(half_span)
+    pad = radius + 1
+    if math.prod(size + 2 * pad for size in occupied.shape) > 2 * MAX_EDIT_CELLS:
+        return fill
+
+    walls = np.pad(occupied, pad)
+    free = 1 - walls
+    # The distance transform measures from cell centers. Include half a cell for the wall edge.
+    clear = cv2.distanceTransform(free, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) >= half_span + 0.5 - 1e-7
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(clear.astype(np.uint8), connectivity=4)
+    outside = labels[0, 0]
+    candidates = np.flatnonzero((stats[:, _AREA] <= max_cells) & (stats[:, _AREA] > 0))
+    candidates = candidates[(candidates != 0) & (candidates != outside)]
+    if not len(candidates):
+        return fill
+
+    outside_free = cv2.floodFill(free, None, (0, 0), 2)[1] == 2
+    explicit_cuts = np.pad(erased, pad)
+    edit_cells = np.pad(edited_boundary, pad) if edited_boundary is not None else None
+    result = np.zeros_like(walls)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    for label in candidates:
+        x, y, width, height, _ = stats[label]
+        region = np.s_[y - radius : y + height + radius, x - radius : x + width + radius]
+        pocket = labels[region] == label
+        # Exact closed loops already use their original area and fill rules.
+        if not np.any(pocket & outside_free[region]):
+            continue
+        grown = cv2.dilate(pocket.astype(np.uint8), kernel)
+        traversed = (grown != 0) & outside_free[region]
+        if np.count_nonzero(traversed) > max_cells or np.any(traversed & explicit_cuts[region]):
+            continue
+        if edit_cells is not None and not np.any(_dilate(grown, 1) & edit_cells[region]):
+            continue
+        result[region][traversed] = 1
+    return result[pad:-pad, pad:-pad]
+
+
+def _joint_cavity_fill(
+    drawn: OccupancyGrid, erased: np.ndarray, sources: list[OccupancyGrid], max_area_m2: float, vehicle_span: float,
+) -> OccupancyGrid:
+    """Find new solid cells using reconstructed imports and edited boundaries together."""
+    if not sources:
+        max_cells = math.floor((max_area_m2 + 1e-9) / drawn.resolution**2)
+        cavities = _enclosed_cells(drawn.cells, max_cells)
+        cavities |= _fill_narrow_pockets(drawn.cells, erased, drawn.resolution, max_cells, vehicle_span)
+        return OccupancyGrid(cavities & ~erased, drawn.origin, drawn.resolution)
+
+    grids = [drawn, *sources]
+    low = np.min([grid.origin for grid in grids], axis=0)
+    high = np.max([grid.origin + np.array(grid.cells.shape[::-1]) * grid.resolution for grid in grids], axis=0)
+    res = min(grid.resolution for grid in grids)
+    while True:
+        origin = drawn.origin + (np.floor((low - drawn.origin) / res) - 1) * res
+        cols, rows = map(int, np.ceil((high - origin) / res) + 1)
+        if cols * rows <= MAX_EDIT_CELLS:
+            break
+        res *= max(1.01, math.sqrt(cols * rows / MAX_EDIT_CELLS))
+
+    shape = (rows, cols)
+    scan = np.zeros(shape, dtype=np.uint8)
+    for source in sources:
+        scan |= _project_grid(source, origin, res, shape)
+    paint = _project_grid(drawn, origin, res, shape)
+    erased = _project_grid(OccupancyGrid(erased.astype(np.uint8), drawn.origin, drawn.resolution), origin, res, shape)
+    radius = _scan_seal_radius(res)
+    scan_barrier = _dilate(scan, radius)
+    occupied = scan | paint
+    barrier = (scan_barrier | paint) & (1 - erased)
+    max_cells = math.floor((max_area_m2 + 1e-9) / res**2)
+    cavities = _enclosed_cells(
+        barrier,
+        max_cells,
+        edited_boundary=paint & (1 - (scan_barrier | erased)),
+    )
+    # Grow into the widened scan boundary, keeping drawn openings and eraser marks intact.
+    fill = cavities | (_dilate(cavities, radius) & scan_barrier) if cavities.any() else cavities
+    fill |= _fill_narrow_pockets(occupied, erased, res, max_cells, vehicle_span, edited_boundary=paint)
+    return OccupancyGrid(fill & (1 - (occupied | erased)), origin, res)
+
+
 def reconstruct_obstacles(
     canonical: CanonicalMap, config: BuildConfig, edits: EditRaster | None = None,
 ) -> CanonicalMap:
@@ -345,8 +471,9 @@ def reconstruct_obstacles(
     eff_res = float(config.grid_resolution)
 
     eraser = edits if edits is not None and np.any(edits.cells == ERASE) else None
+    source_grids = [] if config.fill_solid_obstacles and edits is not None and np.any(edits.cells == DRAW) else None
     for height, pts in _height_groups(canonical, config):
-        g_polys, g_boxes, res = _reconstruct_points(pts, config, eraser)
+        g_polys, g_boxes, res = _reconstruct_points(pts, config, eraser, source_grids)
         polygons += g_polys
         poly_heights += [height] * len(g_polys)
         boxes.append(g_boxes)
@@ -358,7 +485,21 @@ def reconstruct_obstacles(
         canonical.points = canonical.points[~eraser.erased(x, y)]
     if edits is not None:
         drawn = edits.cells == DRAW
-        drawn_boxes = _grid_boxes(drawn, *edits.origin, edits.resolution)
+        occupied = drawn
+        if source_grids is not None:
+            filled = _joint_cavity_fill(
+                OccupancyGrid(drawn.astype(np.uint8), edits.origin, edits.resolution),
+                edits.cells == ERASE, source_grids, config.solid_fill_max_area_m2,
+                min(config.vehicle_proxy.length, config.vehicle_proxy.width),
+            )
+            if source_grids:
+                fill_boxes = _grid_boxes(filled.cells, *filled.origin, filled.resolution)
+                boxes.append(fill_boxes)
+                box_heights += [config.wall_height] * len(fill_boxes)
+                eff_res = max(eff_res, filled.resolution)
+            else:
+                occupied = drawn | filled.cells.astype(bool)
+        drawn_boxes = _grid_boxes(occupied, *edits.origin, edits.resolution)
         samples = np.flatnonzero(drawn)
         stride = max(1, math.ceil(len(samples) / 25000))
         rows, cols = np.unravel_index(samples[::stride], drawn.shape)

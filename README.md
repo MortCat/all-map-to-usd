@@ -19,7 +19,9 @@ If setup fails, check **setup.log** and rerun with `start_app.cmd --force-setup`
 
 Load a map or choose **Empty Map** in **Map Source** and set its width, height, and grid resolution. Open **Edit** next to **Ruler** to draw obstacle points, lines, or outlined and filled rectangles. Use **Eraser** to remove drawn or imported obstacles. Drag with the middle or right mouse button to pan.
 
-Each completed stroke updates the collision preview and the geometry used for USD export and Isaac Sim. Use the **Undo** and **Redo** icons next to **Width**, or press **Ctrl+Z** and **Ctrl+Shift+Z**. Press **R** to measure during editing and again to resume drawing. Edits live in the current app session. Export USD to keep the geometry after closing the app or loading another map.
+Each completed stroke updates the collision preview and the geometry used for USD export and Isaac Sim. With **Fill Solid Loops** enabled, imported obstacles, brush and line strokes, and rectangle outlines can form a closed boundary together. Small edited pockets with entrances too narrow for the AGV can also be filled. This check uses a disk based on the smaller AGV dimension and respects **Max Fill Area (m²)** and eraser openings. Use **Filled** for a rectangle that is solid regardless of the loop settings. Click **Rebuild Obstacles** after changing these settings or the AGV dimensions.
+
+Use the **Undo** and **Redo** icons next to **Width**, or press **Ctrl+Z** and **Ctrl+Shift+Z**. Press **R** to measure during editing and again to resume drawing. Edits live in the current app session. Export USD to keep the geometry after closing the app or loading another map.
 
 ## Supported maps
 
