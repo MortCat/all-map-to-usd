@@ -109,6 +109,8 @@ class CanonicalMap:
     obstacle_polygon_heights: list[float] = field(default_factory=list)
     obstacle_boxes: np.ndarray = field(default_factory=lambda: _empty(4))  # (B, 4) x0,y0,x1,y1
     obstacle_box_heights: list[float] = field(default_factory=list)
+    drawing_bounds: Bounds2D | None = None
+    drawn_points: np.ndarray = field(default_factory=lambda: _empty(2))  # sampled for the viewer
 
     def copy(self) -> CanonicalMap:
         # Input arrays are never mutated in place, so sharing them is safe.
@@ -122,6 +124,7 @@ class CanonicalMap:
             forbidden_zones=list(self.forbidden_zones),
             stations=list(self.stations),
             paths=list(self.paths),
+            drawing_bounds=self.drawing_bounds,
         )
 
     def compute_bounds(self, dropped_layers: Collection[str] = ()) -> Bounds2D:
@@ -140,6 +143,9 @@ class CanonicalMap:
             *(p.points for p in self.paths),
             as_points([(s.x, s.y) for s in self.stations]),
         ]
+        if self.drawing_bounds is not None:
+            b = self.drawing_bounds
+            parts.append(as_points([(b.min_x, b.min_y), (b.max_x, b.max_y)]))
         parts = [p for p in parts if len(p)]
         if not parts:
             return Bounds2D()
@@ -197,8 +203,18 @@ class BuildConfig(BaseModel):
         return set(self.excluded_layers) | {n for n, h in self.layer_heights.items() if h <= 0}
 
 
+class IsaacPullConfig(BaseModel):
+    """Selection and vertical bounds for an Isaac Sim stage snapshot."""
+
+    root_prim_path: str = Field(default="/", min_length=1, max_length=1024)
+    exclude_prim_path: str = Field(default="", max_length=1024)
+    floor_elevation_m: float = Field(default=0.0, ge=-1e6, le=1e6, allow_inf_nan=False)
+    floor_clearance_m: float = Field(default=0.02, ge=0.0, le=20.0, allow_inf_nan=False)
+    geometry: Literal["visible_or_collision", "collision_only"] = "visible_or_collision"
+
+
 class IsaacSimConfig(BaseModel):
-    """Connection settings for live Isaac Sim python_server push."""
+    """Connection settings for live Isaac Sim stage synchronization."""
 
     host: str = "127.0.0.1"
     port: int = 8226
@@ -213,3 +229,4 @@ class IsaacSimConfig(BaseModel):
     # "file" (local copy for 127.0.0.1 / scp for remote hosts), or "auto" (file above the limit)
     transfer_mode: Literal["auto", "inline", "file"] = "auto"
     inline_limit_mb: float = Field(default=8.0, ge=0.1, le=512.0)
+    pull: IsaacPullConfig = Field(default_factory=IsaacPullConfig)

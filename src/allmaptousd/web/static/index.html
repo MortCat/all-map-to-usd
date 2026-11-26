@@ -28,13 +28,13 @@
     <div class="sidebar-scroll">
       <!-- Map Source -->
       <section class="acc open server-only" id="accSource">
-        <button class="acc-head" onclick="toggleAcc('accSource')">
+        <button class="acc-head" aria-expanded="true" onclick="toggleAcc('accSource')">
           <span class="acc-title">Map Source</span>
           <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
         <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
           <div class="field">
-            <span class="field-label">Map Format / Controller</span>
+            <label class="field-label" for="mapFormat">Map Format / Controller</label>
             <select id="mapFormat" onchange="onMapFormatChange()">
               <option value="auto" selected>Auto Detect</option>
               <option value="seer_smap">SEER Robotics (.smap)</option>
@@ -43,7 +43,7 @@
               <option value="raster_image">Image Floorplan / SICK Export (.png/.pgm/.bmp)</option>
             </select>
           </div>
-          <div class="field" id="dxfUnitsField" style="display:none;">
+          <div class="field" id="dxfUnitsField" hidden>
             <span class="field-label">DXF Drawing Units</span>
             <select id="dxfUnits">
               <option value="auto" selected>Auto (from DXF header)</option>
@@ -52,7 +52,7 @@
               <option value="cm">Centimeters (cm)</option>
             </select>
           </div>
-          <div class="field" id="imageResField" style="display:none;">
+          <div class="field" id="imageResField" hidden>
             <span class="field-label">Image Resolution (m/px)</span>
             <div class="stepper">
               <button onclick="stepInput('imageRes', -0.01, 3)">−</button>
@@ -60,29 +60,32 @@
               <button onclick="stepInput('imageRes', 0.01, 3)">+</button>
             </div>
           </div>
-          <div id="dropzone" class="dropzone">
-            <div class="dropzone-icon">
+          <button type="button" id="dropzone" class="dropzone">
+            <span class="dropzone-icon">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
-            </div>
+            </span>
             <strong>Drop or click to select map files</strong>
             <small>SEER <code>.smap</code>, ROS <code>.yaml+.pgm</code>, CAD/SICK <code>.dxf</code>, or <code>.png</code></small>
-            <input id="fileInput" type="file" multiple accept=".smap,.json,.yaml,.yml,.pgm,.png,.bmp,.jpg,.jpeg,.dxf,.zip" style="display:none" />
+          </button>
+          <input id="fileInput" type="file" multiple accept=".smap,.json,.yaml,.yml,.pgm,.png,.bmp,.jpg,.jpeg,.dxf,.zip" hidden />
+          <div class="grid-2">
+            <button class="btn secondary" onclick="openEmptyMap()">Empty Map</button>
+            <button class="btn secondary" onclick="loadSample('ros_factory')" title="Realistic noisy LiDAR SLAM occupancy grid with tilted racks, L-machine, and round pillars">Sample: ROS.yaml</button>
           </div>
-          <button class="btn secondary" onclick="loadSample('ros_factory')" title="Realistic noisy LiDAR SLAM occupancy grid with tilted racks, L-machine, and round pillars">Sample: ROS.yaml</button>
         </div></div></div>
       </section>
 
       <!-- Reconstruction & USD Params -->
       <section class="acc server-only" id="accBuild">
-        <button class="acc-head" onclick="toggleAcc('accBuild')">
+        <button class="acc-head" aria-expanded="false" onclick="toggleAcc('accBuild')">
           <span class="acc-title">Obstacle &amp; USD Parameters</span>
           <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
-        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+        <div class="acc-collapse" inert><div class="acc-collapse-inner"><div class="acc-body">
           <div class="field">
-            <span class="field-label">Reconstruction Mode</span>
+            <label class="field-label" for="reconMode">Reconstruction Mode</label>
             <select id="reconMode">
               <option value="contour_polygon" selected>Contour Polygon (Recommended)</option>
               <option value="aabb">Axis-Aligned Grid Merge (AABB)</option>
@@ -138,7 +141,7 @@
               </div>
             </div>
           </div>
-          <div class="grid-2" style="align-items:end;">
+          <div class="grid-2 align-end">
             <div class="field">
               <span class="field-label">Forbidden Height (m)</span>
               <div class="stepper">
@@ -155,7 +158,7 @@
               </span>
             </label>
           </div>
-          <div class="grid-2" style="align-items:end;">
+          <div class="grid-2 align-end">
             <label class="switch-row" title="Automatically fill enclosed laser-scanned racks and pillars into solid volumes">
               <span>Fill Solid Loops</span>
               <span class="switch">
@@ -172,14 +175,14 @@
               </div>
             </div>
           </div>
-          <label class="switch-row" id="sealUnknownField" style="display:none;" title="Occupancy grids: unknown cells bordering free space (and free cells on the map edge) become walls, closing open SLAM frontiers in the preview, export and Isaac push">
+          <label class="switch-row" id="sealUnknownField" hidden title="Occupancy grids: unknown cells bordering free space (and free cells on the map edge) become walls, closing open SLAM frontiers in the preview, export and Isaac push">
             <span>Seal Unknown Boundary <span class="field-val" id="frontierCount">0</span></span>
             <span class="switch">
               <input id="sealUnknown" type="checkbox" onchange="rebuildMap()" />
               <span class="slider"></span>
             </span>
           </label>
-          <div class="field" id="layerField" style="display:none;">
+          <div class="field" id="layerField" hidden>
             <span class="field-label" title="Toggle a layer to include/exclude it; set a height (m) or leave blank to use Wall Height">
               <span>CAD Layers · Height (m)</span>
               <span class="field-val" id="layerCount">0</span>
@@ -195,11 +198,11 @@
 
       <!-- AGV Collision Proxy -->
       <section class="acc" id="accAgv">
-        <button class="acc-head" onclick="toggleAcc('accAgv')">
+        <button class="acc-head" aria-expanded="false" onclick="toggleAcc('accAgv')">
           <span class="acc-title">AGV Footprint Collision Check</span>
           <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
-        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+        <div class="acc-collapse" inert><div class="acc-collapse-inner"><div class="acc-body">
           <div id="collisionStatus" class="status-banner idle">
             <span class="status-left"><span class="status-dot"></span><span id="collisionLabel">Waiting for map</span></span>
             <span class="status-val" id="clearanceText">--</span>
@@ -260,24 +263,24 @@
 
       <!-- Export -->
       <section class="acc server-only" id="accExport">
-        <button class="acc-head" onclick="toggleAcc('accExport')">
+        <button class="acc-head" aria-expanded="false" onclick="toggleAcc('accExport')">
           <span class="acc-title">Export USD Template</span>
           <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
-        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+        <div class="acc-collapse" inert><div class="acc-collapse-inner"><div class="acc-body">
           <div class="field" title="USD coordinates are re-expressed relative to this origin and heading">
             <span class="field-label">USD Origin (map coords)</span>
             <div class="grid-3">
               <div class="stepper">
-                <span class="unit" style="padding:0 0 0 7px;">X</span>
+                <span class="unit">X</span>
                 <input id="originX" type="number" step="0.1" value="0.000" />
               </div>
               <div class="stepper">
-                <span class="unit" style="padding:0 0 0 7px;">Y</span>
+                <span class="unit">Y</span>
                 <input id="originY" type="number" step="0.1" value="0.000" />
               </div>
               <div class="stepper">
-                <span class="unit" style="padding:0 0 0 7px;">∠</span>
+                <span class="unit">∠</span>
                 <input id="originYaw" type="number" step="1" min="-360" max="360" value="0" />
                 <span class="unit">°</span>
               </div>
@@ -303,52 +306,77 @@
             </span>
           </label>
           <div class="grid-2">
-            <button class="btn primary" id="exportUsdBtn" onclick="exportUsd('usd')" disabled>Export .usd</button>
+            <button class="btn secondary" id="exportUsdBtn" onclick="exportUsd('usd')" disabled>Export .usd</button>
             <button class="btn secondary" id="exportUsdaBtn" onclick="exportUsd('usda')" disabled>Export .usda</button>
           </div>
-          <div id="exportStatus" style="font-size:11px;color:var(--text-muted);font-family:var(--mono);line-height:1.4;word-break:break-all;">
-            Output Dir: D:\Code\AllMapToUSD\exports\
+          <div id="exportStatus" class="action-status" role="status">
+            Output folder: exports/
           </div>
         </div></div></div>
       </section>
 
-      <!-- Isaac Sim Live Push -->
+      <!-- Isaac Sim Stage Sync -->
       <section class="acc server-only" id="accIsaac">
-        <button class="acc-head" onclick="toggleAcc('accIsaac')">
-          <span class="acc-title">Push to Isaac Sim (Live Stage)</span>
-          <span class="acc-right"><span style="color:var(--ok);font-size:10px;font-weight:700;">LIVE</span><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+        <button class="acc-head" aria-expanded="false" onclick="toggleAcc('accIsaac')">
+          <span class="acc-title">Isaac Sim Sync</span>
+          <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
-        <div class="acc-collapse"><div class="acc-collapse-inner"><div class="acc-body">
+        <div class="acc-collapse" inert><div class="acc-collapse-inner"><div class="acc-body">
           <div class="row">
-            <div class="field" style="flex:2">
-              <span class="field-label">Isaac Sim Host IP</span>
+            <div class="field field-wide">
+              <label class="field-label" for="isaacHost">Isaac Sim Host</label>
               <input id="isaacHost" type="text" value="127.0.0.1" />
             </div>
             <div class="field">
-              <span class="field-label">Port</span>
+              <label class="field-label" for="isaacPort">Port</label>
               <div class="stepper">
                 <input id="isaacPort" type="number" value="8226" />
               </div>
             </div>
           </div>
+          <button class="btn" id="testIsaacBtn" onclick="testIsaac()">Test Connection</button>
           <div class="grid-2">
-            <div class="field">
-              <span class="field-label">Stage Mode</span>
+            <button class="btn secondary" id="pushIsaacBtn" onclick="pushToIsaac()" disabled>Push to Isaac Sim</button>
+            <button class="btn secondary" id="pullIsaacBtn" onclick="pullFromIsaac()" title="Replace the canvas with a snapshot of the active stage">Pull from Isaac Sim</button>
+          </div>
+          <p id="isaacPullRange" class="isaac-pull-range"></p>
+          <div id="isaacStatus" class="action-status" role="status"></div>
+          <div class="grid-2">
+            <label class="field">
+              <span class="field-label">Push Stage Mode</span>
               <select id="isaacPushMode">
                 <option value="reference">Reference in Current USD</option>
                 <option value="open_stage">Open as New Stage</option>
               </select>
-            </div>
-            <div class="field">
-              <span class="field-label">Target Prim Path</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Push Target Prim</span>
               <input id="isaacPrim" type="text" value="/World/AGV_Map" />
-            </div>
+            </label>
+            <label class="field">
+              <span class="field-label">Pull Source Prim</span>
+              <input id="isaacPullRoot" type="text" value="/" title="/ includes the entire stage" />
+            </label>
+            <label class="field">
+              <span class="field-label">Exclude Prim</span>
+              <input id="isaacPullExclude" type="text" placeholder="Optional robot path" />
+            </label>
+            <label class="field">
+              <span class="field-label">Floor Elevation (m)</span>
+              <span class="stepper"><input id="isaacPullFloor" type="number" step="0.01" value="0" oninput="updateIsaacPullRange()" /></span>
+            </label>
+            <label class="field">
+              <span class="field-label">Floor Clearance (m)</span>
+              <span class="stepper"><input id="isaacPullClearance" type="number" step="0.01" min="0" value="0.02" oninput="updateIsaacPullRange()" /></span>
+            </label>
           </div>
-          <div class="grid-2">
-            <button class="btn" id="testIsaacBtn" onclick="testIsaac()">Test Connection</button>
-            <button class="btn primary" id="pushIsaacBtn" onclick="pushToIsaac()" disabled>Push to Isaac Sim</button>
-          </div>
-          <div id="isaacStatus" style="font-size:11px;color:var(--text-muted);font-family:var(--mono);line-height:1.45;word-break:break-word;"></div>
+          <label class="field">
+            <span class="field-label">Pull Geometry</span>
+            <select id="isaacPullGeometry">
+              <option value="visible_or_collision">Visible or Collidable</option>
+              <option value="collision_only">Colliders Only</option>
+            </select>
+          </label>
         </div></div></div>
       </section>
     </div>
@@ -360,7 +388,7 @@
   <!-- Main CAD Viewport -->
   <main class="viewport">
     <div class="toolbar">
-      <button class="btn icon-only" id="expandSidebarBtn" onclick="toggleSidebar()" title="Toggle Sidebar (Shortcut: B)">
+      <button class="btn icon-only" id="expandSidebarBtn" onclick="toggleSidebar()" aria-expanded="true" aria-controls="sidebarShell" title="Toggle Sidebar (Shortcut: B)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>
         </svg>
@@ -372,9 +400,13 @@
       </button>
       <button class="btn icon-only" onclick="zoomBy(1.25)" title="Zoom In (+)">+</button>
       <button class="btn icon-only" onclick="zoomBy(0.8)" title="Zoom Out (-)">−</button>
-      <button class="btn" id="rulerBtn" onclick="toggleRuler()" title="Ruler Measurement (Shortcut: R)">
+      <button class="btn" id="rulerBtn" onclick="toggleRuler()" aria-pressed="false" title="Ruler Measurement (Shortcut: R)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.4 2.4 0 0 1 0-3.4l2.6-2.6a2.4 2.4 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/></svg>
         Ruler
+      </button>
+      <button class="btn" id="editBtn" onclick="toggleEditor()" aria-expanded="false" aria-controls="editTools" title="Edit map obstacles" disabled>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m4 16-1 5 5-1L21 7l-4-4Z"/><path d="m14 6 4 4"/></svg>
+        Edit
       </button>
       <div class="sep"></div>
       <label class="layer-pill"><input id="layerBoxes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#94a3b8"></span>Obstacles</label>
@@ -387,31 +419,76 @@
       <div class="meta-bar" id="metaSummary">No map loaded</div>
     </div>
 
+      <div id="editTools" class="edit-tools" role="group" aria-label="Map drawing tools" hidden>
+        <div class="edit-tools-group">
+          <button class="btn" type="button" data-edit-tool="brush" aria-pressed="true" title="Click to add a point or drag to draw">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 15 10-12 2 2-8 13M9 15c-4-1-4 4-6 5 4 2 9 1 10-2Z"/></svg>Brush
+          </button>
+          <button class="btn" type="button" data-edit-tool="line" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20 20 4"/></svg>Line
+          </button>
+          <button class="btn" type="button" data-edit-tool="rectangle" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1"/></svg>Rectangle
+          </button>
+          <button class="btn" type="button" data-edit-tool="eraser" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 14 10-10 8 8-8 8H9Zm5-5 8 8M13 20h8"/></svg>Eraser
+          </button>
+        </div>
+        <div class="edit-tools-group edit-settings">
+          <label id="editRectangleField" class="edit-option" hidden>
+            <span class="sr-only">Rectangle style</span>
+            <select id="editRectangleStyle"><option value="outline">Outline</option><option value="filled">Filled</option></select>
+          </label>
+          <div class="edit-tools-group" aria-label="Edit history" role="group">
+            <button id="editUndo" class="btn icon-only" type="button" onclick="undoEdit()" aria-label="Undo" title="Undo (Ctrl+Z)" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5-5 5 5 5M4 10h10a5 5 0 0 1 0 10h-2"/></svg>
+            </button>
+            <button id="editRedo" class="btn icon-only" type="button" onclick="redoEdit()" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 5 5-5 5m5-5H10a5 5 0 0 0 0 10h2"/></svg>
+            </button>
+          </div>
+          <div id="editWidthField" class="edit-option">
+            <label for="editWidth">Width <span class="sr-only">in meters</span></label>
+            <div class="stepper">
+              <button type="button" aria-label="Decrease drawing width" onclick="stepInput('editWidth', -0.01, 3, saveEditWidth)">−</button>
+              <input id="editWidth" type="number" min="0.01" max="5" step="0.01" value="0.05" />
+              <span class="unit" aria-hidden="true">m</span>
+              <button type="button" aria-label="Increase drawing width" onclick="stepInput('editWidth', 0.01, 3, saveEditWidth)">+</button>
+            </div>
+          </div>
+        </div>
+        <div class="edit-tools-group edit-save-state">
+          <span id="editStatus" class="edit-status" aria-live="polite"></span>
+          <button id="editRetry" class="btn" type="button" onclick="savePendingEdits()" hidden>Retry</button>
+        </div>
+      </div>
+
     <div class="canvas-wrap">
       <canvas id="canvas"></canvas>
 
       <!-- Empty State Card -->
       <div class="empty-overlay" id="emptyOverlay">
         <div class="empty-card">
-          <div style="color:var(--accent);">
+          <div class="empty-card-icon">
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
               <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
             </svg>
           </div>
           <h3>Load an AGV / AMR Map to Begin</h3>
           <p>Supports SEER <code>.smap</code>, ROS <code>.yaml + .pgm/.png</code>, CAD / SICK SMET <code>.dxf</code>, and image floorplans.<br/>Measure aisle clearances, test AGV collisions, and export or push directly to Isaac Sim.</p>
-          <div class="server-only">
-            <button class="btn primary" style="width:100%" onclick="loadSample('ros_factory')">Load Sample: ROS.yaml</button>
+          <div class="grid-2 server-only">
+            <button class="btn secondary" onclick="openEmptyMap()">Empty Map</button>
+            <button class="btn secondary" onclick="loadSample('ros_factory')">Load Sample: ROS.yaml</button>
           </div>
         </div>
       </div>
 
       <div class="hud-bottom-left">
         <span>Cursor <strong id="cursorCoord">(0.00, 0.00) m</strong></span>
-        <span style="opacity:0.35">|</span>
+        <span class="hud-divider" aria-hidden="true">|</span>
         <span>AGV <strong id="agvCoord">(0.00, 0.00, 0°)</strong></span>
-        <span style="opacity:0.35">|</span>
-        <span><kbd>Q</kbd><kbd>E</kbd> Rotate · <kbd>R</kbd> Ruler · <kbd>F</kbd> Fit · <kbd>B</kbd> Sidebar</span>
+        <span class="hud-divider hud-shortcuts-divider" aria-hidden="true">|</span>
+        <span class="hud-shortcuts"><kbd>Q</kbd><kbd>E</kbd> Rotate · <kbd>R</kbd> Ruler · <kbd>F</kbd> Fit · <kbd>B</kbd> Sidebar</span>
       </div>
 
       <div class="hud-bottom-right">
@@ -426,9 +503,56 @@
   </main>
 </div>
 
+<dialog id="emptyMapDialog" class="map-dialog" aria-labelledby="emptyMapTitle">
+  <form id="emptyMapForm">
+    <h2 id="emptyMapTitle">Empty Map</h2>
+    <div class="field">
+      <label class="field-label" for="emptyMapWidth">Width (m)</label>
+      <div class="stepper">
+        <button type="button" aria-label="Decrease map width" onclick="stepInput('emptyMapWidth', -0.1)">−</button>
+        <input id="emptyMapWidth" name="width" type="number" min="0.1" max="1000" step="0.01" value="20" required autofocus />
+        <button type="button" aria-label="Increase map width" onclick="stepInput('emptyMapWidth', 0.1)">+</button>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field-label" for="emptyMapHeight">Height (m)</label>
+      <div class="stepper">
+        <button type="button" aria-label="Decrease map height" onclick="stepInput('emptyMapHeight', -0.1)">−</button>
+        <input id="emptyMapHeight" name="height" type="number" min="0.1" max="1000" step="0.01" value="20" required />
+        <button type="button" aria-label="Increase map height" onclick="stepInput('emptyMapHeight', 0.1)">+</button>
+      </div>
+    </div>
+    <div class="field">
+      <label class="field-label" for="emptyMapResolution">Resolution (m/cell)</label>
+      <div class="stepper">
+        <button type="button" aria-label="Decrease map resolution" onclick="stepInput('emptyMapResolution', -0.01)">−</button>
+        <input id="emptyMapResolution" name="resolution" type="number" min="0.01" max="1" step="0.01" value="0.05" required />
+        <button type="button" aria-label="Increase map resolution" onclick="stepInput('emptyMapResolution', 0.01)">+</button>
+      </div>
+    </div>
+    <p id="emptyMapError" class="map-dialog-error" role="alert" hidden></p>
+    <div class="map-dialog-actions">
+      <button class="btn" type="button" onclick="document.getElementById('emptyMapDialog').close()">Cancel</button>
+      <button class="btn primary" type="submit">Create Map</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="replaceMapDialog" class="map-dialog" aria-labelledby="replaceMapTitle" aria-describedby="replaceMapMessage">
+  <form method="dialog">
+    <h2 id="replaceMapTitle">Replace current map?</h2>
+    <p id="replaceMapMessage" class="map-dialog-message">Loading a different map will discard the current map’s edits.</p>
+    <div class="map-dialog-actions">
+      <button class="btn" type="submit" value="cancel" autofocus>Cancel</button>
+      <button class="btn secondary" type="submit" value="replace">Replace Map</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- Load order matters: later files use functions and state from earlier ones. -->
 <script defer src="/static/js/core.js"></script>
 <script defer src="/static/js/collision.js"></script>
+<script defer src="/static/js/editor.js"></script>
 <script defer src="/static/js/render.js"></script>
 <script defer src="/static/js/controls.js"></script>
 <script defer src="/static/js/api.js"></script>

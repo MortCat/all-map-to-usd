@@ -17,6 +17,7 @@ import math
 import cv2
 import numpy as np
 
+from allmaptousd.geometry.editing import DRAW, ERASE, EditRaster
 from allmaptousd.models import BuildConfig, CanonicalMap, as_points
 
 _AREA = cv2.CC_STAT_AREA
@@ -255,7 +256,7 @@ def _height_groups(canonical: CanonicalMap, config: BuildConfig) -> list[tuple[f
 
 
 def _reconstruct_points(
-    pts: np.ndarray, config: BuildConfig
+    pts: np.ndarray, config: BuildConfig, edits: EditRaster | None,
 ) -> tuple[list[np.ndarray], np.ndarray, float]:
     """Rasterize one point group and rebuild it as (polygons, boxes, effective_resolution)."""
     res = float(config.grid_resolution)
@@ -289,15 +290,40 @@ def _reconstruct_points(
     if config.fill_solid_obstacles:
         grid = _fill_enclosed_solid_obstacles(grid, res, config.solid_fill_max_area_m2)
 
+    exact_grid = grid
+    if edits is not None:
+        rs, cs = np.nonzero(grid)
+        erased = edits.erased(
+            min_x + (cs + 0.5) * res, min_y + (rs + 0.5) * res,
+            radius=res / 2 if res > edits.resolution else 0,
+        )
+        if erased.any():
+            er, ec = rs[erased], cs[erased]
+            if config.reconstruction_mode == "contour_polygon":
+                # Keep ordinary contours away from the eraser. Use exact boxes for affected
+                # components so simplification cannot close a narrow erased gap.
+                count, labels = cv2.connectedComponents(grid, connectivity=4)
+                affected = np.zeros(count, dtype=bool)
+                affected[labels[er, ec]] = True
+                affected_cells = affected[labels]
+                exact_grid = grid & affected_cells
+                grid[affected_cells] = 0
+            exact_grid[er, ec] = 0
+
     if config.reconstruction_mode == "contour_polygon":
         polys = _reconstruct_contour_polygons(
             grid, float(min_x), float(min_y), res, float(config.contour_simplify_tol)
         )
-        return polys, as_points([], (4,)), res
+        boxes = _grid_boxes(exact_grid, min_x, min_y, res) if exact_grid is not grid else as_points([], (4,))
+        return polys, boxes, res
 
+    return [], _grid_boxes(exact_grid, min_x, min_y, res), res
+
+
+def _grid_boxes(grid: np.ndarray, min_x: float, min_y: float, res: float) -> np.ndarray:
     rects = np.asarray(_merge_grid_to_rectangles(grid.astype(bool)), dtype=np.float64).reshape(-1, 4)
     # (r0, c0, r1, c1) cell indices -> (x0, y0, x1, y1) meters
-    boxes = np.round(
+    return np.round(
         np.column_stack((
             min_x + rects[:, 1] * res,
             min_y + rects[:, 0] * res,
@@ -306,10 +332,11 @@ def _reconstruct_points(
         )),
         5,
     )
-    return [], boxes, res
 
 
-def reconstruct_obstacles(canonical: CanonicalMap, config: BuildConfig) -> CanonicalMap:
+def reconstruct_obstacles(
+    canonical: CanonicalMap, config: BuildConfig, edits: EditRaster | None = None,
+) -> CanonicalMap:
     """Populate the obstacle polygons/boxes (+ per-item heights) from raw points/segments."""
     polygons: list[np.ndarray] = []
     poly_heights: list[float] = []
@@ -317,13 +344,32 @@ def reconstruct_obstacles(canonical: CanonicalMap, config: BuildConfig) -> Canon
     box_heights: list[float] = []
     eff_res = float(config.grid_resolution)
 
+    eraser = edits if edits is not None and np.any(edits.cells == ERASE) else None
     for height, pts in _height_groups(canonical, config):
-        g_polys, g_boxes, res = _reconstruct_points(pts, config)
+        g_polys, g_boxes, res = _reconstruct_points(pts, config, eraser)
         polygons += g_polys
         poly_heights += [height] * len(g_polys)
         boxes.append(g_boxes)
         box_heights += [height] * len(g_boxes)
         eff_res = max(eff_res, res)
+
+    if eraser is not None:
+        x, y = canonical.points.T
+        canonical.points = canonical.points[~eraser.erased(x, y)]
+    if edits is not None:
+        drawn = edits.cells == DRAW
+        drawn_boxes = _grid_boxes(drawn, *edits.origin, edits.resolution)
+        samples = np.flatnonzero(drawn)
+        stride = max(1, math.ceil(len(samples) / 25000))
+        rows, cols = np.unravel_index(samples[::stride], drawn.shape)
+        canonical.drawn_points = edits.origin + (np.column_stack((cols, rows)) + 0.5) * edits.resolution
+        if canonical.drawing_bounds is not None:
+            b = canonical.drawing_bounds
+            drawn_boxes[:, [0, 2]] = drawn_boxes[:, [0, 2]].clip(b.min_x, b.max_x)
+            drawn_boxes[:, [1, 3]] = drawn_boxes[:, [1, 3]].clip(b.min_y, b.max_y)
+            canonical.drawn_points = canonical.drawn_points.clip([b.min_x, b.min_y], [b.max_x, b.max_y])
+        boxes.append(drawn_boxes)
+        box_heights += [config.wall_height] * len(drawn_boxes)
 
     canonical.obstacle_polygons = polygons
     canonical.obstacle_polygon_heights = poly_heights

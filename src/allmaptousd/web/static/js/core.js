@@ -8,7 +8,8 @@ const cam = { cx: 0, cy: 0, scale: 40 };
 const agv = { x: 0, y: 0, length: 1.2, width: 0.8, height: 0.6, yawDeg: 0, margin: 0.1 };
 
 let rulerActive = false, rulerP1 = null, rulerP2 = null;
-let dragMode = null; // 'pan' | 'agv'
+let rulerAwaitingSecond = false;
+let dragMode = null;
 let lastMouse = { x: 0, y: 0 };
 let agvDragOffset = { x: 0, y: 0 };
 let lastCollision = { hit: false, minDist: Infinity, reason: "" };
@@ -42,12 +43,20 @@ function _syncCanvasDuringTransition(durationMs = 320) {
 }
 
 function toggleSidebar() {
-  sidebarShell.classList.toggle("collapsed");
+  const collapsed = sidebarShell.classList.toggle("collapsed");
+  const button = document.getElementById("expandSidebarBtn");
+  if (collapsed && sidebarShell.contains(document.activeElement)) button.focus();
+  sidebarShell.inert = collapsed;
+  button.setAttribute("aria-expanded", String(!collapsed));
   _syncCanvasDuringTransition(340);
 }
 
 function toggleAcc(id) {
-  document.getElementById(id)?.classList.toggle("open");
+  const section = document.getElementById(id);
+  if (!section) return;
+  const expanded = section.classList.toggle("open");
+  section.querySelector(".acc-head").setAttribute("aria-expanded", String(expanded));
+  section.querySelector(".acc-collapse").inert = !expanded;
 }
 
 function stepInput(id, delta, decimals = 2, cb = null) {

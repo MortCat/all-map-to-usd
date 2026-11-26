@@ -63,10 +63,10 @@ function render() {
     }
   }
 
-  if (document.getElementById("layerPoints").checked && mapData.raw_points.length) {
+  if (document.getElementById("layerPoints").checked) {
     ctx.fillStyle = "rgba(56, 189, 248, 0.75)";
     const ptSize = cam.scale > 60 ? 2.5 : 1.6;
-    for (const [px, py] of mapData.raw_points) {
+    for (const [px, py] of mapData.raw_points.concat(mapData.drawn_points || [])) {
       const s = worldToScreen(px, py);
       ctx.fillRect(s.x - ptSize * 0.5, s.y - ptSize * 0.5, ptSize, ptSize);
     }
@@ -159,6 +159,13 @@ function render() {
     ctx.beginPath(); ctx.arc(frontS.x, frontS.y, 4, 0, Math.PI * 2); ctx.fill();
   }
 
+  drawMapEdits();
+
+  if (rulerP1 && !rulerP2) {
+    const start = worldToScreen(rulerP1.x, rulerP1.y);
+    ctx.fillStyle = "#f59e0b";
+    ctx.beginPath(); ctx.arc(start.x, start.y, 4, 0, Math.PI * 2); ctx.fill();
+  }
   if (rulerP1 && rulerP2) {
     const s1 = worldToScreen(rulerP1.x, rulerP1.y);
     const s2 = worldToScreen(rulerP2.x, rulerP2.y);

@@ -1,18 +1,40 @@
 // Mouse/keyboard interaction, AGV/origin controls, CAD layer list.
 // Classic script: shares the global scope with the other js/*.js files (see index.html).
 
+function canvasPointer(e) {
+  const rect = canvas.getBoundingClientRect();
+  return [e.clientX - rect.left, e.clientY - rect.top];
+}
+
+function stopDrag() {
+  if (dragMode === "ruler" && rulerP2) rulerAwaitingSecond = false;
+  dragMode = null;
+  canvas.classList.remove("dragging");
+}
+
 // --- Mouse & Keyboard ---
 canvas.addEventListener("mousedown", (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-  const wp = screenToWorld(sx, sy);
-
-  if (rulerActive && e.button === 0) {
-    if (!rulerP1 || (rulerP1 && rulerP2)) { rulerP1 = wp; rulerP2 = wp; }
-    else { rulerP2 = wp; }
+  const wp = screenToWorld(...canvasPointer(e));
+  if (mapData && rulerActive && e.button === 0) {
+    if (rulerAwaitingSecond) {
+      rulerP2 = wp;
+      rulerAwaitingSecond = false;
+    } else {
+      rulerP1 = wp;
+      rulerP2 = null;
+      rulerAwaitingSecond = true;
+      dragMode = "ruler";
+      lastMouse = { x: e.clientX, y: e.clientY };
+    }
     render();
     return;
   }
+
+  if (editor.open && e.button === 0) {
+    startEditStroke(wp);
+    return;
+  }
+  if (e.button === 1 || (e.button === 2 && editor.open)) e.preventDefault();
 
   if (mapData && e.button === 0 && document.getElementById("layerAgv").checked) {
     if (pointInPolygon(wp.x, wp.y, getAgvCorners())) {
@@ -28,15 +50,17 @@ canvas.addEventListener("mousedown", (e) => {
 });
 
 window.addEventListener("mousemove", (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
-  const wp = screenToWorld(sx, sy);
+  const wp = screenToWorld(...canvasPointer(e));
   document.getElementById("cursorCoord").textContent = `(${wp.x.toFixed(2)}, ${wp.y.toFixed(2)}) m`;
 
-  if (rulerActive && rulerP1 && e.buttons === 1) {
-    rulerP2 = wp; render(); return;
-  }
-  if (dragMode === "agv") {
+  if (dragMode === "ruler") {
+    if (Math.hypot(e.clientX - lastMouse.x, e.clientY - lastMouse.y) >= 3 || rulerP2) {
+      rulerP2 = wp;
+      render();
+    }
+  } else if (dragMode === "edit") {
+    moveEditStroke(wp);
+  } else if (dragMode === "agv") {
     agv.x = wp.x + agvDragOffset.x; agv.y = wp.y + agvDragOffset.y; render();
   } else if (dragMode === "pan") {
     const dx = e.clientX - lastMouse.x, dy = e.clientY - lastMouse.y;
@@ -46,13 +70,27 @@ window.addEventListener("mousemove", (e) => {
   }
 });
 
-window.addEventListener("mouseup", () => { dragMode = null; canvas.classList.remove("dragging"); });
+window.addEventListener("mouseup", (e) => {
+  if (dragMode === "edit") {
+    if (e.button !== 0) return;
+    moveEditStroke(screenToWorld(...canvasPointer(e)));
+    finishEditStroke();
+  }
+  stopDrag();
+});
+
+window.addEventListener("blur", () => {
+  finishEditStroke();
+  stopDrag();
+});
+canvas.addEventListener("contextmenu", (e) => {
+  if (editor.open) e.preventDefault();
+});
 
 canvas.addEventListener("wheel", (e) => {
   e.preventDefault();
   if (e.shiftKey) { rotateAgv(e.deltaY > 0 ? -5 : 5); return; }
-  const rect = canvas.getBoundingClientRect();
-  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  const [sx, sy] = canvasPointer(e);
   const before = screenToWorld(sx, sy);
   cam.scale = Math.max(3, Math.min(600, cam.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
   const after = screenToWorld(sx, sy);
@@ -61,26 +99,56 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 window.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-  if (e.key === "q" || e.key === "Q") rotateAgv(5);
-  else if (e.key === "e" || e.key === "E") rotateAgv(-5);
-  else if (e.key === "r" || e.key === "R") toggleRuler();
-  else if (e.key === "f" || e.key === "F") fitToView();
-  else if (e.key === "b" || e.key === "B") toggleSidebar();
+  if (e.target.closest?.("dialog[open], input, select, textarea, [contenteditable]")) return;
+  const key = e.key.toLowerCase();
+  if (e.ctrlKey || e.metaKey) {
+    if (editor.open && (key === "z" || key === "y")) {
+      e.preventDefault();
+      finishEditStroke();
+      if (key === "y" || e.shiftKey) redoEdit();
+      else undoEdit();
+    }
+    return;
+  }
+  if (e.repeat && key === "r") return;
+  if (key === "escape" && editor.stroke) {
+    editor.stroke = null;
+    dragMode = null;
+    render();
+    return;
+  }
+  if (key === "q") rotateAgv(5);
+  else if (key === "e") rotateAgv(-5);
+  else if (key === "r") toggleRuler();
+  else if (key === "f") fitToView();
+  else if (key === "b") toggleSidebar();
 });
 
 function toggleRuler() {
-  rulerActive = !rulerActive;
-  document.getElementById("rulerBtn").classList.toggle("active", rulerActive);
-  canvas.classList.toggle("ruler-mode", rulerActive);
-  if (!rulerActive) { rulerP1 = null; rulerP2 = null; }
+  finishEditStroke();
+  stopDrag();
+  setRulerActive(!rulerActive);
+  updateEditorControls();
   render();
+}
+
+function setRulerActive(active) {
+  rulerActive = active;
+  const button = document.getElementById("rulerBtn");
+  button.classList.toggle("active", rulerActive);
+  button.setAttribute("aria-pressed", String(rulerActive));
+  canvas.classList.toggle("ruler-mode", rulerActive);
+  if (!rulerActive) {
+    rulerP1 = rulerP2 = null;
+    rulerAwaitingSecond = false;
+  }
 }
 
 function onAgvInput() {
   agv.length = Math.max(0.1, parseFloat(document.getElementById("agvL").value) || 1.2);
   agv.width = Math.max(0.1, parseFloat(document.getElementById("agvW").value) || 0.8);
   agv.height = Math.max(0.1, parseFloat(document.getElementById("agvH").value) || 0.6);
+  updateIsaacPullRange();
   agv.yawDeg = parseFloat(document.getElementById("agvYaw").value) || 0;
   agv.margin = Math.max(0, parseFloat(document.getElementById("agvMargin").value) || 0);
   document.getElementById("yawLabel").textContent = `${Math.round(agv.yawDeg)}°`;
@@ -109,7 +177,7 @@ function renderLayerList(layers) {
   const field = document.getElementById("layerField");
   const list = document.getElementById("layerList");
   list.innerHTML = "";
-  field.style.display = layers && layers.length ? "flex" : "none";
+  field.hidden = !layers?.length;
   document.getElementById("layerCount").textContent = (layers || []).length;
   for (const name of (layers || [])) {
     const row = document.createElement("div");
@@ -119,6 +187,7 @@ function renderLayerList(layers) {
     sw.className = "switch";
     sw.title = "Include this layer";
     const cb = Object.assign(document.createElement("input"), { type: "checkbox", checked: true });
+    cb.setAttribute("aria-label", `Include layer ${name}`);
     cb.dataset.layer = name;
     cb.addEventListener("change", () => row.classList.toggle("off", !cb.checked));
     sw.append(cb, Object.assign(document.createElement("span"), { className: "slider" }));
@@ -130,6 +199,7 @@ function renderLayerList(layers) {
     const h = Object.assign(document.createElement("input"), {
       type: "number", step: "0.1", min: "0.05", max: "20", placeholder: "wall"
     });
+    h.setAttribute("aria-label", `Wall height for ${name} in meters`);
     h.dataset.layer = name;
     stepper.append(h, Object.assign(document.createElement("span"), { className: "unit", textContent: "m" }));
 

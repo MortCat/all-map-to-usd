@@ -1,4 +1,4 @@
-"""Live Isaac Sim python_server client for pushing USD layouts into an active Stage.
+"""Live Isaac Sim python_server client for pushing layouts and pulling stage geometry.
 
 Speaks the exact TCP protocol of ``isaacsim.code_editor.python_server`` (default port 8226).
 When targeting a remote host IP (e.g. 192.168.3.158) whose python_server is bound to
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import gzip
 import json
 import os
 import re
@@ -169,6 +170,54 @@ def _last_json_line(resp: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def build_pull_script(cfg: IsaacSimConfig, low: float, high: float) -> str:
+    """Run the projection against the active stage without authoring any USD changes."""
+    projection = Path(__file__).with_name("usd_slice.py").read_text(encoding="utf-8")
+    arguments = (
+        cfg.pull.root_prim_path, cfg.pull.exclude_prim_path, low, high, cfg.pull.geometry == "collision_only",
+    )
+    return projection + f"""
+
+import base64, gzip, json
+import omni.timeline
+import omni.usd
+
+def _pull_stage():
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise ValueError("No active stage in Isaac Sim.")
+    seconds = omni.timeline.get_timeline_interface().get_current_time()
+    time = Usd.TimeCode(seconds * stage.GetTimeCodesPerSecond())
+    result = collect_stage_slice(stage, time, *{arguments!r})
+    data = json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    print(json.dumps({{"stage_slice": base64.b64encode(gzip.compress(data, compresslevel=3)).decode("ascii")}}))
+
+_pull_stage()
+"""
+
+
+def pull_stage_slice(cfg: IsaacSimConfig, low: float, high: float) -> dict[str, Any]:
+    """Read the stage slice over the same direct or SSH connection used by Push."""
+    try:
+        host, port, _ = _resolve_endpoint(cfg)
+        reply = send_python_cell(host, port, build_pull_script(cfg, low, high), timeout=cfg.timeout_sec)
+    except OSError as exc:
+        raise RuntimeError(f"Cannot pull from Isaac Sim ({cfg.host}:{cfg.port}): {exc}") from exc
+    if reply.get("status") == "error":
+        error = reply.get("evalue") or "No stage data returned."
+        if reply.get("ename") == "ValueError":
+            raise ValueError(error)
+        raise RuntimeError(f"Isaac Sim pull failed: {error}")
+    try:
+        payload = _last_json_line(reply)["stage_slice"]
+        data = json.loads(gzip.decompress(base64.b64decode(payload, validate=True)))
+        if not isinstance(data, dict) or not {"stage", "prim_count", "projected", "sections"} <= data.keys():
+            raise ValueError("Invalid stage projection")
+        return data
+    except (KeyError, OSError, EOFError, TypeError, ValueError) as exc:
+        raise RuntimeError("Isaac Sim did not return a valid stage projection.") from exc
+
+
 def check_isaac_connection(cfg: IsaacSimConfig) -> dict[str, Any]:
     """Verify live Isaac Sim python_server connectivity and inspect the active Stage."""
     probe_code = (
@@ -256,6 +305,50 @@ def deliver_usd_file(usd_bytes: bytes, file_name: str, cfg: IsaacSimConfig) -> s
     return f"scp -> {target}:{remote_dir}/{file_name}"
 
 
+_FRAME_PUSHED_MAP = """
+def _frame_pushed_map(stage, mounted_at):
+    from omni.kit.viewport.utility import frame_viewport_prims, get_active_viewport
+    from pxr import Gf, Usd
+
+    viewport = get_active_viewport()
+    if viewport is None or viewport.stage != stage:
+        return False
+    paths = []
+    for suffix in ("Map/Obstacles", "Map/ForbiddenZones"):
+        prim = stage.GetPrimAtPath(f"{mounted_at}/{suffix}")
+        if prim and prim.GetChildren():
+            paths.append(str(prim.GetPath()))
+    if not paths:
+        paths = [f"{mounted_at}/Environment/Ground"]
+        if not stage.GetPrimAtPath(paths[0]):
+            paths = [mounted_at]
+
+    cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+    bounds = Gf.Range3d()
+    for path in paths:
+        bounds.UnionWith(cache.ComputeWorldBound(stage.GetPrimAtPath(path)).ComputeAlignedRange())
+    if bounds.IsEmpty():
+        return False
+    center = bounds.GetMidpoint()
+    size = max(bounds.GetSize().GetLength(), 1.0)
+    y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
+    up = Gf.Vec3d(0, 1, 0) if y_up else Gf.Vec3d(0, 0, 1)
+    direction = Gf.Vec3d(0.7, 1.1, 0.9) if y_up else Gf.Vec3d(0.7, -0.9, 1.1)
+    session = stage.GetSessionLayer()
+    camera_path = Sdf.Path("/AllMapToUSDPreviewCamera")
+    with Usd.EditContext(stage, session):
+        # Use a viewport-only camera so framing never overwrites the current scene camera.
+        while stage.GetPrimAtPath(camera_path) and not session.GetPrimAtPath(camera_path):
+            camera_path = Sdf.Path(str(camera_path) + "_")
+        camera = UsdGeom.Camera.Define(stage, camera_path)
+        transform = Gf.Matrix4d(1).SetLookAt(center + direction * size, center, up).GetInverse()
+        camera.MakeMatrixXform().Set(transform)
+        camera.CreateClippingRangeAttr().Set(Gf.Vec2f(max(0.001, size * 0.0001), max(100000, size * 100)))
+        viewport.camera_path = camera_path
+        return frame_viewport_prims(viewport, prims=paths)
+""".strip()
+
+
 def build_push_script(
     usd_bytes: bytes | None,
     map_name: str,
@@ -298,7 +391,8 @@ _target_prim = {target_prim!r}
 _add_light = {bool(cfg.add_dome_light)!r}
 
 if _mode == "open_stage":
-    _ctx.open_stage(_usd_str)
+    if not _ctx.open_stage(_usd_str):
+        raise RuntimeError(f"Cannot open USD stage: {{_usd_str}}")
     _stage = _ctx.get_stage()
     _mounted_at = "/World"
 else:
@@ -313,12 +407,25 @@ else:
     _prim.GetReferences().AddReference(_usd_str)
     _mounted_at = _target_prim
 
-if _add_light and _stage is not None:
-    # Silence Isaac Sim's default grazing-angle DistantLight so our overhead map lighting shines cleanly
-    for _def_path in ("/World/defaultLight", "/Environment/defaultLight"):
-        _dl = _stage.GetPrimAtPath(_def_path)
-        if _dl.IsValid():
-            _dl.SetActive(False)
+_lighting = UsdGeom.Imageable(_stage.GetPrimAtPath(f"{{_mounted_at}}/Lighting"))
+if _lighting and _mode == "reference":
+    _target_path = Sdf.Path(_mounted_at)
+    _has_scene_lights = any(
+        UsdLux.LightAPI(prim) and not prim.GetPath().HasPrefix(_target_path)
+        and UsdGeom.Imageable(prim).ComputeVisibility() != UsdGeom.Tokens.invisible
+        for prim in _stage.Traverse()
+    )
+    _lighting.CreateVisibilityAttr().Set(
+        UsdGeom.Tokens.inherited if _add_light and not _has_scene_lights else UsdGeom.Tokens.invisible
+    )
+
+{_FRAME_PUSHED_MAP}
+
+_framed = False
+try:
+    _framed = bool(_frame_pushed_map(_stage, _mounted_at))
+except Exception as _frame_error:
+    print(f"Viewport framing unavailable: {{_frame_error}}")
 
 _stage_url = _stage.GetRootLayer().identifier if _stage else ""
 print(json.dumps({{
@@ -327,6 +434,7 @@ print(json.dumps({{
     "mounted_prim": _mounted_at,
     "push_mode": _mode,
     "stage_url": _stage_url,
+    "viewport_framed": _framed,
 }}))
 """.strip()
 
@@ -371,10 +479,12 @@ def push_usd_to_isaac(
         "mounted_prim": parsed.get("mounted_prim", cfg.target_prim_path),
         "push_mode": parsed.get("push_mode", cfg.push_mode),
         "stage_url": parsed.get("stage_url", ""),
+        "viewport_framed": bool(parsed.get("viewport_framed")),
         "elapsed_seconds": resp.get("elapsed_seconds"),
         "delivery": delivery,
         "message": (
             f"Mounted to {cfg.host}{via} · Prim: {parsed.get('mounted_prim', cfg.target_prim_path)} "
             f"(File: {parsed.get('remote_usd_path', '')}, {delivery})"
+            + (" · View framed" if parsed.get("viewport_framed") else "")
         ),
     }

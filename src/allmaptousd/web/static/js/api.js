@@ -1,18 +1,61 @@
-// Backend calls: load/upload/rebuild, USD export, Isaac Sim push.
+// Backend calls: load/upload/rebuild, USD export, Isaac Sim sync.
 // Classic script: shares the global scope with the other js/*.js files (see index.html).
 
 // --- Server API ---
-function applyMapPayload(payload, shouldFit = true) {
+let mapRequestActive = false;
+
+async function runMapRequest(action) {
+  if (mapRequestActive) return;
+  finishEditStroke();
+  mapRequestActive = true;
+  updateEditorControls();
+  try {
+    if (await savePendingEdits()) await action();
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    mapRequestActive = false;
+    updateEditorControls();
+  }
+}
+
+function mapRevisionHeader() {
+  return mapData ? { "X-Map-Revision": mapData.edit_revision } : {};
+}
+
+async function postMapRequest(url, body, fallback = "Map request failed.") {
+  const isJson = body !== undefined && !(body instanceof FormData);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: isJson ? { "Content-Type": "application/json", ...mapRevisionHeader() } : {},
+    body: isJson ? JSON.stringify(body) : body,
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(typeof error?.detail === "string" ? error.detail : fallback);
+  }
+  return res;
+}
+
+async function postJson(url, body, fallback) {
+  return (await postMapRequest(url, body, fallback)).json();
+}
+
+function applyMapPayload(payload, shouldFit = true, newSource = null, { preserveVehicle = false } = {}) {
   mapData = payload;
+  if (newSource) resetEditor(newSource === "edit");
   document.getElementById("emptyOverlay").classList.add("hidden");
   const m = payload.metadata, b = payload.bounds;
   const w = (b.max_x - b.min_x).toFixed(2), h = (b.max_y - b.min_y).toFixed(2);
   const polyCount = (payload.obstacle_polygons || []).length;
   const boxCount = (payload.obstacle_boxes || []).length;
-  const obsLabel = polyCount > 0 ? `${polyCount} polygons` : `${boxCount} boxes`;
+  const obsLabel = [
+    polyCount ? `${polyCount} polygons` : "",
+    boxCount ? `${boxCount} boxes` : "",
+  ].filter(Boolean).join(" + ") || "0 obstacles";
   const navLabel = (payload.stations || []).length || (payload.paths || []).length
     ? ` · ${payload.stations.length} stations · ${payload.paths.length} paths` : "";
-  const coarse = m.extra && m.extra.resolution_was_coarsened;
+  const coarse = m.extra?.resolution_was_coarsened;
   const coarseLabel = coarse ? ` · ⚠ grid coarsened to ${m.extra.effective_grid_resolution} m` : "";
   document.getElementById("metaSummary").textContent =
     `${m.name} · ${w}×${h} m · ${obsLabel} · ${payload.forbidden_zones.length} zones${navLabel}${coarseLabel}`;
@@ -20,14 +63,14 @@ function applyMapPayload(payload, shouldFit = true) {
     showToast(`Map too large: grid resolution coarsened to ${m.extra.effective_grid_resolution} m`);
   }
   renderLayerList(payload.layers);
-  const frontier = (m.extra && m.extra.unknown_frontier_cells) || 0;
-  document.getElementById("sealUnknownField").style.display = frontier > 0 ? "flex" : "none";
+  const frontier = m.extra?.unknown_frontier_cells || 0;
+  document.getElementById("sealUnknownField").hidden = !frontier;
   document.getElementById("frontierCount").textContent = `${frontier} cells`;
   if (payload.config && "seal_unknown" in payload.config) {
     document.getElementById("sealUnknown").checked = !!payload.config.seal_unknown;
   }
 
-  if (payload.config?.vehicle_proxy) {
+  if (!preserveVehicle && payload.config?.vehicle_proxy) {
     const vp = payload.config.vehicle_proxy;
     agv.length = vp.length; agv.width = vp.width; agv.height = vp.height;
     agv.x = vp.pos_x; agv.y = vp.pos_y; agv.yawDeg = vp.yaw_deg;
@@ -37,6 +80,7 @@ function applyMapPayload(payload, shouldFit = true) {
     document.getElementById("agvH").value = vp.height.toFixed(2);
     document.getElementById("agvYaw").value = vp.yaw_deg;
     document.getElementById("yawLabel").textContent = `${Math.round(vp.yaw_deg)}°`;
+    updateIsaacPullRange();
   }
 
   ["rebuildBtn", "exportUsdBtn", "exportUsdaBtn", "pushIsaacBtn"].forEach((id) => {
@@ -44,6 +88,7 @@ function applyMapPayload(payload, shouldFit = true) {
     if (el) el.disabled = false;
   });
 
+  updateEditorControls();
   if (shouldFit) fitToView();
   else render();
 }
@@ -78,62 +123,48 @@ function collectBuildConfig() {
 }
 
 async function loadSample(sampleId) {
-  const res = await fetch(`/api/load-sample/${sampleId}`, { method: "POST" });
-  if (!res.ok) { showToast("Failed to load sample map"); return; }
-  const data = await res.json();
-  applyMapPayload(data, true);
-  showToast(`Loaded sample: ${data.metadata.name}`);
+  if (mapRequestActive || !(await canReplaceMap())) return;
+  return runMapRequest(async () => {
+    const data = await postJson(`/api/load-sample/${sampleId}`, undefined, "Failed to load sample map.");
+    applyMapPayload(data, true, "loaded");
+    showToast(`Loaded sample: ${data.metadata.name}`);
+  });
 }
 
 function onMapFormatChange() {
   const fmt = document.getElementById("mapFormat").value;
-  document.getElementById("dxfUnitsField").style.display = fmt === "dxf_cad" ? "flex" : "none";
-  document.getElementById("imageResField").style.display = fmt === "raster_image" ? "flex" : "none";
+  document.getElementById("dxfUnitsField").hidden = fmt !== "dxf_cad";
+  document.getElementById("imageResField").hidden = fmt !== "raster_image";
 }
 
 async function uploadFiles(fileList) {
-  if (!fileList || !fileList.length) return;
+  const files = Array.from(fileList || []);
+  if (!files.length || mapRequestActive || !(await canReplaceMap())) return;
   const fd = new FormData();
-  for (const f of fileList) fd.append("files", f);
+  for (const f of files) fd.append("files", f);
   fd.append("format_hint", document.getElementById("mapFormat").value || "auto");
   fd.append("image_resolution", document.getElementById("imageRes").value || "0.05");
   fd.append("dxf_units", document.getElementById("dxfUnits").value || "auto");
-  const res = await fetch("/api/upload", { method: "POST", body: fd });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: "Parse failed" }));
-    showToast(`Error: ${err.detail}`);
-    return;
-  }
-  const data = await res.json();
-  applyMapPayload(data, true);
-  showToast(`Loaded: ${data.metadata.name}`);
+  return runMapRequest(async () => {
+    const data = await postJson("/api/upload", fd, "Map import failed.");
+    applyMapPayload(data, true, "loaded");
+    showToast(`Loaded: ${data.metadata.name}`);
+  });
 }
 
-async function rebuildMap() {
-  const res = await fetch("/api/rebuild", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(collectBuildConfig())
+function rebuildMap() {
+  return runMapRequest(async () => {
+    applyMapPayload(await postJson("/api/rebuild", collectBuildConfig()), false);
+    showToast("Map rebuilt");
   });
-  if (!res.ok) { showToast("Rebuild failed"); return; }
-  const data = await res.json();
-  applyMapPayload(data, false);
-  const pCount = (data.obstacle_polygons || []).length;
-  const bCount = (data.obstacle_boxes || []).length;
-  showToast(pCount > 0 ? `Rebuilt (${pCount} contour polygons)` : `Rebuilt (${bCount} AABB boxes)`);
 }
 
-async function triggerDownload(url, bodyObj, fallbackName) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(bodyObj)
-  });
-  if (!res.ok) { showToast("Export failed"); return; }
+async function downloadUsd(ext) {
+  const res = await postMapRequest(`/api/export/usd?ext=${ext}`, collectBuildConfig(), "Export failed.");
   const blob = await res.blob();
   const cd = res.headers.get("Content-Disposition") || "";
   const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
-  const filename = m ? decodeURIComponent(m[1]) : fallbackName;
+  const filename = m ? decodeURIComponent(m[1]) : `map_layout.${ext}`;
   const savedPath = decodeURIComponent(res.headers.get("X-Saved-Path") || "");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -144,77 +175,140 @@ async function triggerDownload(url, bodyObj, fallbackName) {
   URL.revokeObjectURL(a.href);
   const expEl = document.getElementById("exportStatus");
   if (expEl && savedPath) {
-    expEl.style.color = "#4ade80";
+    expEl.dataset.state = "success";
     expEl.textContent = `Saved: ${savedPath}`;
   }
   showToast(savedPath ? `Exported to ${savedPath}` : `Exported: ${filename}`);
 }
 
 function exportUsd(ext) {
-  triggerDownload(`/api/export/usd?ext=${ext}`, collectBuildConfig(), `map_layout.${ext}`);
+  return runMapRequest(() => downloadUsd(ext));
 }
 // Full IsaacSimConfig as loaded from /api/isaac/config (see main.js). The panel only edits a few
 // fields; the rest (ssh_user, remote_save_dir, transfer_mode, ...) must round-trip unchanged,
-// because every Test / Push saves the config back to isaac_config.json.
+// because sync operations save the config back to isaac_config.json.
 let isaacConfigBase = {};
 
+function readIsaacPullSettings() {
+  return {
+    root_prim_path: document.getElementById("isaacPullRoot").value.trim() || "/",
+    exclude_prim_path: document.getElementById("isaacPullExclude").value.trim(),
+    floor_elevation_m: document.getElementById("isaacPullFloor").valueAsNumber,
+    floor_clearance_m: document.getElementById("isaacPullClearance").valueAsNumber,
+    geometry: document.getElementById("isaacPullGeometry").value,
+  };
+}
+
 function collectIsaacConfig() {
+  const pull = readIsaacPullSettings();
   return {
     ...isaacConfigBase,
     host: document.getElementById("isaacHost").value.trim() || "127.0.0.1",
     port: parseInt(document.getElementById("isaacPort").value, 10) || 8226,
     target_prim_path: document.getElementById("isaacPrim").value.trim() || "/World/AGV_Map",
-    push_mode: document.getElementById("isaacPushMode").value || "reference"
+    push_mode: document.getElementById("isaacPushMode").value || "reference",
+    pull: isaacPullRange(pull) ? pull : isaacConfigBase.pull,
   };
 }
 
-async function testIsaac() {
-  const cfg = collectIsaacConfig();
-  const statusEl = document.getElementById("isaacStatus");
-  statusEl.style.color = "var(--text-dim)";
-  statusEl.textContent = `Testing ${cfg.host}:${cfg.port} ...`;
-  const res = await fetch("/api/isaac/test", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cfg)
-  });
-  const data = await res.json();
-  statusEl.style.color = data.reachable ? "#4ade80" : "#f87171";
-  statusEl.textContent = data.message;
+function isaacPullRange(pull) {
+  const floor = pull.floor_elevation_m;
+  const clearance = pull.floor_clearance_m;
+  if (!Number.isFinite(floor) || Math.abs(floor) > 1e6 ||
+      !Number.isFinite(clearance) || clearance < 0 || clearance > 20 || clearance >= agv.height) return null;
+  return [floor + clearance, floor + agv.height];
 }
 
-async function pushToIsaac() {
-  const btn = document.getElementById("pushIsaacBtn");
-  const statusEl = document.getElementById("isaacStatus");
-  const isaacCfg = collectIsaacConfig();
-  btn.disabled = true;
-  btn.textContent = "Pushing...";
-  statusEl.style.color = "var(--accent)";
-  statusEl.textContent = `Building USD and pushing to ${isaacCfg.host}:${isaacCfg.port} ...`;
+const INVALID_PULL_RANGE = "Enter a valid floor elevation and a clearance below the AGV height.";
+
+function updateIsaacPullRange() {
+  const range = isaacPullRange(readIsaacPullSettings());
+  document.getElementById("isaacPullRange").textContent = range
+    ? `Pull range: ${range[0].toFixed(3)}–${range[1].toFixed(3)} m (AGV height ${agv.height.toFixed(2)} m)`
+    : INVALID_PULL_RANGE;
+}
+
+async function runIsaacAction(buttonId, busyLabel, message, action, failureNotice) {
+  const button = document.getElementById(buttonId);
+  if (button.disabled) return;
+  const status = document.getElementById("isaacStatus");
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = busyLabel;
+  status.dataset.state = "pending";
+  status.textContent = message;
   try {
-    const res = await fetch("/api/isaac/push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        build_config: collectBuildConfig(),
-        isaac_config: isaacCfg
-      })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) {
-      statusEl.style.color = "#f87171";
-      statusEl.textContent = data.detail || data.message || "Push failed";
-      showToast("Push to Isaac Sim failed");
-    } else {
-      statusEl.style.color = "#4ade80";
-      statusEl.textContent = data.message;
-      showToast(`Mounted in Isaac Sim (${data.mounted_prim})`);
-    }
+    status.textContent = await action();
+    status.dataset.state = "success";
   } catch (err) {
-    statusEl.style.color = "#f87171";
-    statusEl.textContent = `Request error: ${err}`;
+    status.textContent = err.message;
+    status.dataset.state = "error";
+    if (failureNotice) showToast(failureNotice);
   } finally {
-    btn.disabled = false;
-    btn.textContent = "Push to Isaac Sim";
+    button.disabled = false;
+    button.textContent = label;
   }
+}
+
+function isaacMapRequest(direction, cfg) {
+  return postJson(`/api/isaac/${direction}`, {
+    build_config: collectBuildConfig(),
+    isaac_config: cfg,
+  }, `Isaac Sim ${direction} failed.`);
+}
+
+async function pullFromIsaac() {
+  if (mapRequestActive) return;
+  if (!isaacPullRange(readIsaacPullSettings())) {
+    showToast(INVALID_PULL_RANGE);
+    return;
+  }
+  if (!(await canReplaceMap())) return;
+  const cfg = collectIsaacConfig();
+  return runMapRequest(() => runIsaacAction(
+    "pullIsaacBtn", "Pulling…", `Reading ${cfg.pull.root_prim_path} from ${cfg.host}:${cfg.port}…`,
+    async () => {
+      const data = await isaacMapRequest("pull", cfg);
+      isaacConfigBase = cfg;
+      const build = data.config;
+      document.getElementById("gridRes").value = build.grid_resolution;
+      document.getElementById("reconMode").value = build.reconstruction_mode;
+      document.getElementById("morphClose").value = build.morph_close_cells;
+      document.getElementById("dilateCells").value = build.dilate_cells;
+      document.getElementById("minCluster").value = build.min_cluster_cells;
+      document.getElementById("fillSolid").checked = build.fill_solid_obstacles;
+      document.getElementById("originX").value = build.origin_x;
+      document.getElementById("originY").value = build.origin_y;
+      document.getElementById("originYaw").value = build.origin_yaw_deg;
+      applyMapPayload(data, true, "loaded");
+      const meta = data.metadata.extra;
+      const skipped = meta.isaac_unsupported_prims ? ` · ${meta.isaac_unsupported_prims} unsupported geometry skipped` : "";
+      const coarsened = data.metadata.resolution > meta.isaac_requested_resolution_m
+        ? ` · grid coarsened to ${data.metadata.resolution} m` : "";
+      showToast("Isaac Sim map loaded");
+      return `Pulled ${meta.isaac_projected_prims} obstacle prims from ${data.metadata.name}${skipped}${coarsened}`;
+    }, "Pull from Isaac Sim failed",
+  ));
+}
+
+function testIsaac() {
+  const cfg = collectIsaacConfig();
+  return runIsaacAction("testIsaacBtn", "Testing…", `Testing ${cfg.host}:${cfg.port}…`, async () => {
+    const data = await postJson("/api/isaac/test", cfg, "Connection test failed.");
+    if (!data.reachable) throw new Error(data.message);
+    return data.message;
+  });
+}
+
+function pushToIsaac() {
+  const cfg = collectIsaacConfig();
+  return runMapRequest(() => runIsaacAction(
+    "pushIsaacBtn", "Pushing…", `Building USD and pushing to ${cfg.host}:${cfg.port}…`,
+    async () => {
+      const data = await isaacMapRequest("push", cfg);
+      if (!data.ok) throw new Error(data.message || "Push failed.");
+      showToast(`Mounted in Isaac Sim (${data.mounted_prim})`);
+      return data.message;
+    }, "Push to Isaac Sim failed",
+  ));
 }
