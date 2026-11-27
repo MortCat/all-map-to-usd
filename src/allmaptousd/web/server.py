@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import io
+import os
+import subprocess
+import sys
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from threading import RLock
@@ -10,16 +15,17 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import numpy as np
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from allmaptousd.exporters import check_isaac_connection, push_usd_to_isaac
 from allmaptousd.exporters.isaac_connector import pull_stage_slice
+from allmaptousd.exporters.ros_map import export_ros_map_zip
 from allmaptousd.geometry.editing import MapStroke
 from allmaptousd.geometry.isaac_map import map_from_stage_slice
-from allmaptousd.model_assets import ModelSource, import_model, open_model_files, open_model_source
+from allmaptousd.model_assets import ModelSource, import_model, open_model_files, open_model_source, write_tree
 from allmaptousd.models import Bounds2D, BuildConfig, CanonicalMap, IsaacSimConfig, MapMetadata
 from allmaptousd.parsers import MapInputBundle
 from allmaptousd.pipeline import MapSession, NoMapLoaded
@@ -136,17 +142,47 @@ class AppState:
         if revision is not None and revision != self.session.edit_revision:
             raise HTTPException(status_code=409, detail="The current map has changed. Reload the map to continue.")
 
-    def build_usd(self, config: BuildConfig, extension: str, revision: str | None) -> tuple[str, bytes]:
+    def build_usd(
+        self, config: BuildConfig, extension: str, revision: str | None,
+    ) -> tuple[str, bytes, dict[str, bytes]]:
+        """(map name, USD, files the placed models use by their path relative to the USD)."""
         with self.map_lock:
             self.check_map_revision(revision)
             built = self.session.rebuild(config)
-            return built.metadata.name, self.session.export_bytes(extension)
+            try:
+                return built.metadata.name, *self.session.export_package(extension)
+            except ValueError as exc:  # e.g. a placed model that is no longer loaded
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def build_ros_map(self, config: BuildConfig, revision: str | None) -> tuple[str, bytes]:
+        with self.map_lock:
+            self.check_map_revision(revision)
+            built = self.session.rebuild(config)
+            stem = safe_filename(built.metadata.name.replace(" ", "_"))
+            return stem, export_ros_map_zip(built, self.session.config, stem, self.session.models)
 
 
 state = AppState()
 
 
 app = FastAPI(title="AllMapToUSD", version="1.1.0")
+
+
+# Host names the UI may be reached under. A web page on another site that rebinds its DNS name to
+# 127.0.0.1 still sends its own name here, so it cannot drive the API (which can run code in Isaac
+# Sim). run_app.py adds the --host it binds to; "*" turns the check off.
+ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+MAX_REQUEST_BYTES = 1 << 30  # 1 GiB: far above real map uploads, stops a runaway request filling the disk
+
+
+@app.middleware("http")
+async def _guard_requests(request: Request, call_next):
+    if "*" not in ALLOWED_HOSTS and request.url.hostname not in ALLOWED_HOSTS:
+        return JSONResponse(status_code=400, content={"detail": "Invalid host header."})
+    length = request.headers.get("content-length", "")
+    if length.isdigit() and int(length) > MAX_REQUEST_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "Upload is larger than 1 GiB."})
+    return await call_next(request)
 
 
 @app.exception_handler(NoMapLoaded)
@@ -279,27 +315,142 @@ def rebuild_map(config: BuildConfig, x_map_revision: MapRevision = None) -> dict
         return state.payload()
 
 
-@app.post("/api/export/usd")
-def export_usd(config: BuildConfig, ext: str = "usd", x_map_revision: MapRevision = None) -> Response:
-    clean_ext = "usda" if ext.lower() == "usda" else "usd"
-    name, data = state.build_usd(config, f".{clean_ext}", x_map_revision)
-    filename = f"{safe_filename(name.replace(' ', '_'))}.{clean_ext}"
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    saved_path = EXPORT_DIR / filename
-    saved_path.write_bytes(data)
+class ExportTarget(BaseModel):
+    """Where an export is saved: ``name`` (default: the map name) in ``folder`` (default: exports/)."""
+
+    name: str = ""
+    folder: str = ""
+    overwrite: bool = True   # replace a file of the same name (the Save As dialog asks first)
+    download: bool = True    # also send the file back (the UI only saves it)
+
+
+def _export_folder(folder: str) -> Path:
+    if not folder.strip():
+        return EXPORT_DIR
+    path = Path(folder.strip()).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400, detail=f"Enter the full path of the folder, not '{folder}'.")
+    return path
+
+
+def _export_name(name: str, default_stem: str, ext: str) -> str:
+    stem = name.strip()
+    if stem.lower().endswith(f".{ext}"):
+        stem = stem[: -len(ext) - 1]
+    return f"{safe_filename(stem) if stem else default_stem}.{ext}"
+
+
+def _saved_download(
+    target: ExportTarget, default_stem: str, ext: str, data: bytes, media_type: str,
+    files: dict[str, bytes] | None = None,
+) -> Response:
+    """Save the file as ``target`` says and send it back (or, without ``target.download``, where it was
+    saved). With ``files`` (paths relative to the file) they are saved next to it too, and the
+    download is a zip of all of them."""
+    filename = _export_name(target.name, default_stem, ext)
+    folder = _export_folder(target.folder)
+    saved_path = folder / filename
+    if saved_path.exists() and not target.overwrite:
+        raise HTTPException(status_code=409, detail=f"{saved_path} already exists.")
+    try:
+        write_tree(folder, {filename: data, **(files or {})})
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Cannot save to {folder}: {exc}") from exc
+    if not target.download:
+        return JSONResponse({"saved_path": str(saved_path), "files": len(files or {})})
+    if files:
+        package = io.BytesIO()
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(filename, data)
+            for rel, blob in files.items():
+                zf.writestr(rel, blob)
+        filename, data, media_type = f"{Path(filename).stem}_usd.zip", package.getvalue(), "application/zip"
+    ext = Path(filename).suffix
     # HTTP headers are latin-1 only: send an ASCII fallback plus an RFC 5987 UTF-8 filename.
     return Response(
         content=data,
-        media_type="application/octet-stream",
+        media_type=media_type,
         headers={
-            "Content-Disposition": (
-                f'attachment; filename="map_layout.{clean_ext}"; '
-                f"filename*=UTF-8''{quote(filename)}"
-            ),
+            "Content-Disposition": f"attachment; filename=\"map_layout{ext}\"; filename*=UTF-8''{quote(filename)}",
             "X-Saved-Path": quote(str(saved_path), safe=":/\\"),
         },
     )
 
+
+@app.post("/api/export/usd")
+def export_usd(
+    config: BuildConfig, ext: str = "usd", target: Annotated[ExportTarget, Depends()] = ExportTarget(),
+    x_map_revision: MapRevision = None,
+) -> Response:
+    clean_ext = "usda" if ext.lower() == "usda" else "usd"
+    name, data, files = state.build_usd(config, f".{clean_ext}", x_map_revision)
+    stem = safe_filename(name.replace(" ", "_"))
+    return _saved_download(target, stem, clean_ext, data, "application/octet-stream", files)
+
+
+@app.post("/api/export/ros-map")
+def export_ros_map(
+    config: BuildConfig, target: Annotated[ExportTarget, Depends()] = ExportTarget(),
+    x_map_revision: MapRevision = None,
+) -> Response:
+    """The map as a Nav2 occupancy map (.yaml + .pgm in a zip), which is also the project save."""
+    try:
+        stem, data = state.build_ros_map(config, x_map_revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _saved_download(target, stem, "zip", data, "application/zip")
+
+
+# A native "Save As" dialog, in its own process so Tk never runs on a server thread. It asks before
+# replacing an existing file. Arguments: folder, file name, extension, file type label.
+_SAVE_DIALOG = """
+import sys, tkinter
+from tkinter import filedialog
+folder, name, ext, label = sys.argv[1:5]
+root = tkinter.Tk()
+root.withdraw()
+root.attributes("-topmost", True)
+print(filedialog.asksaveasfilename(parent=root, title="Save As", initialdir=folder, initialfile=name,
+                                   defaultextension=ext, filetypes=[(label, "*" + ext)]))
+"""
+_EXPORT_TYPES = {"usd": "USD (binary)", "usda": "USD (text)", "zip": "Map save (ROS zip)"}
+
+
+class SaveAsRequest(BaseModel):
+    ext: Literal["usd", "usda", "zip"]
+    name: str = ""    # suggested file name (without extension)
+    folder: str = ""  # folder to start in (default: exports/)
+
+
+@app.post("/api/export/save-as")
+def choose_export_path(req: SaveAsRequest, request: Request) -> dict:
+    """Ask where to save an export in a dialog on this computer. Returns the chosen ``folder`` and
+    ``name``, or empty strings when the user cancels."""
+    if request.client is None or request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        raise HTTPException(status_code=400, detail="The Save As dialog only opens on the computer running the app.")
+    start = Path(req.folder.strip()).expanduser() if req.folder.strip() else EXPORT_DIR
+    while not start.is_dir() and start != start.parent:
+        start = start.parent
+    name = safe_filename(req.name.strip()) if req.name.strip() else "map_layout"
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _SAVE_DIALOG, str(start if start.is_dir() else ROOT_DIR), f"{name}.{req.ext}",
+             f".{req.ext}", _EXPORT_TYPES[req.ext]],
+            capture_output=True, text=True, encoding="utf-8", timeout=1800,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},  # file names in any language
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(status_code=500, detail=f"The Save As dialog could not be opened: {exc}") from exc
+    if done.returncode != 0:
+        raise HTTPException(status_code=500, detail="The Save As dialog could not be opened.")
+    chosen = done.stdout.strip()
+    if not chosen:
+        return {"folder": "", "name": ""}
+    path = Path(chosen)
+    return {"folder": str(path.parent), "name": path.name}
+
+
+# --- 3D models (equipment) -------------------------------------------------------------------
 
 class ModelSelectRequest(BaseModel):
     token: str = Field(min_length=1, max_length=64)
@@ -404,9 +555,9 @@ def test_isaac(cfg: IsaacSimConfig) -> dict:
 
 @app.post("/api/isaac/push")
 def push_to_isaac(req: IsaacPushRequest, x_map_revision: MapRevision = None) -> dict:
-    name, data = state.build_usd(req.build_config, ".usd", x_map_revision)
+    name, data, files = state.build_usd(req.build_config, ".usd", x_map_revision)
     state.save_isaac_config(req.isaac_config)
-    return push_usd_to_isaac(data, name, req.isaac_config)
+    return push_usd_to_isaac(data, name, req.isaac_config, files)
 
 
 @app.post("/api/isaac/pull")

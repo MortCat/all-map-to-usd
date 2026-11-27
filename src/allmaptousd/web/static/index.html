@@ -67,7 +67,7 @@
               </svg>
             </span>
             <strong>Drop or click to select map files</strong>
-            <small>SEER <code>.smap</code>, ROS <code>.yaml+.pgm</code>, CAD/SICK <code>.dxf</code>, or <code>.png</code></small>
+            <small>SEER <code>.smap</code>, ROS <code>.yaml+.pgm</code>, CAD/SICK <code>.dxf</code>, <code>.png</code>, or a saved map <code>.zip</code></small>
           </button>
           <input id="fileInput" type="file" multiple accept=".smap,.json,.yaml,.yml,.pgm,.png,.bmp,.jpg,.jpeg,.dxf,.zip" hidden />
           <div class="grid-2">
@@ -81,7 +81,7 @@
       <section class="acc server-only" id="accBuild">
         <button class="acc-head" aria-expanded="false" onclick="toggleAcc('accBuild')">
           <span class="acc-title">Obstacle &amp; USD Parameters</span>
-          <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
+          <span class="acc-right"><span class="acc-badge" id="rebuildBadge" hidden>Rebuild needed</span><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
         <div class="acc-collapse" inert><div class="acc-collapse-inner"><div class="acc-body">
           <div class="field">
@@ -264,7 +264,7 @@
       <!-- Export -->
       <section class="acc server-only" id="accExport">
         <button class="acc-head" aria-expanded="false" onclick="toggleAcc('accExport')">
-          <span class="acc-title">Export USD Template</span>
+          <span class="acc-title">Export &amp; Save</span>
           <span class="acc-right"><span class="acc-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"/></svg></span></span>
         </button>
         <div class="acc-collapse" inert><div class="acc-collapse-inner"><div class="acc-body">
@@ -309,8 +309,12 @@
             <button class="btn secondary" id="exportUsdBtn" onclick="exportUsd('usd')" disabled>Export .usd</button>
             <button class="btn secondary" id="exportUsdaBtn" onclick="exportUsd('usda')" disabled>Export .usda</button>
           </div>
+          <button class="btn secondary" id="saveMapBtn" onclick="saveRosMap()" disabled
+                  title="A ROS / Nav2 map (.yaml + .pgm) of the obstacles, zipped. Drop it on Map Source to reopen it with the zones, stations, paths, build settings and AGV pose.">
+            Save Map (ROS .zip)
+          </button>
           <div id="exportStatus" class="action-status" role="status">
-            Output folder: exports/
+            Export asks where to save the file and what to call it.
           </div>
         </div></div></div>
       </section>
@@ -570,18 +574,6 @@
   </form>
 </dialog>
 
-<dialog id="replaceMapDialog" class="map-dialog" aria-labelledby="replaceMapTitle" aria-describedby="replaceMapMessage">
-  <form method="dialog">
-    <h2 id="replaceMapTitle">Replace current map?</h2>
-    <p id="replaceMapMessage" class="map-dialog-message">Loading a different map will discard the current map’s edits.</p>
-    <div class="map-dialog-actions">
-      <button class="btn" type="submit" value="cancel" autofocus>Cancel</button>
-      <button class="btn secondary" type="submit" value="replace">Replace Map</button>
-    </div>
-  </form>
-</dialog>
-
-<!-- Load order matters: later files use functions and state from earlier ones. -->
 <dialog id="modelDialog" class="map-dialog model-dialog" aria-labelledby="modelDialogTitle">
   <form id="modelForm">
     <h2 id="modelDialogTitle">Insert 3D Model</h2>

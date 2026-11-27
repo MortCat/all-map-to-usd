@@ -11,7 +11,8 @@ Convert AGV/AMR navigation maps into simulation-ready OpenUSD obstacle layouts. 
 1. On Windows, install Python 3.11+ and double-click **start_app.cmd**. The first launch creates a virtual environment and installs dependencies. Use `start_app.cmd --browser` to open the UI in your default browser.
 2. Drop a map into **Map Source**, or click **Sample: ROS.yaml** to try the bundled example.
 3. Use **Ruler** to measure an aisle. Under **AGV Footprint Collision Check**, enter the vehicle dimensions, drag the footprint, and rotate it with **Q** or **E** to check clearance.
-4. Export **.usd** (binary) or **.usda** (text) to **exports/**. You can set the output origin and heading and include stations, routes, and an AGV proxy. Export works offline.
+4. Export **.usd** (binary) or **.usda** (text). A **Save As** window asks where to save the file and what to call it. It suggests the map name and opens in the folder of the last export, or **exports/** the first time. You can set the output origin and heading and include stations, routes, and an AGV proxy. Export works offline.
+5. Click **Save Map (ROS .zip)** to keep your work. The zip is a standard ROS / Nav2 map (YAML + PGM) of the obstacles. It also stores the forbidden zones, stations, routes, build settings, and AGV pose. Drop it into **Map Source** to reopen the map where you left off.
 
 If setup fails, check **setup.log** and rerun with `start_app.cmd --force-setup`. The app writes to **app.log**.
 
@@ -21,7 +22,7 @@ Load a map or choose **Empty Map** in **Map Source** and set its width, height, 
 
 Each completed stroke updates the collision preview and the geometry used for USD export and Isaac Sim. With **Fill Solid Loops** enabled, imported obstacles, brush and line strokes, and rectangle outlines can form a closed boundary together. Small edited pockets with entrances too narrow for the AGV can also be filled. This check uses a disk based on the smaller AGV dimension and respects **Max Fill Area (m²)** and eraser openings. Use **Filled** for a rectangle that is solid regardless of the loop settings. Click **Rebuild Obstacles** after changing these settings or the AGV dimensions.
 
-Use the **Undo** and **Redo** icons next to **Width**, or press **Ctrl+Z** and **Ctrl+Shift+Z**. Press **R** to measure during editing and again to resume drawing. Edits live in the current app session. Export USD to keep the geometry after closing the app or loading another map.
+Use the **Undo** and **Redo** icons next to **Width**, or press **Ctrl+Z** and **Ctrl+Shift+Z**. Press **R** to measure during editing and again to resume drawing. Edits live in the current app session. Use **Save Map (ROS .zip)** to keep them after closing the app or loading another map.
 
 ## Place 3D models
 
@@ -32,6 +33,8 @@ STEP import uses OpenCASCADE, a large download. `start_app.cmd` installs it duri
 A USD model often keeps its textures, materials (`.mdl`), or parts in separate files. To import the whole model, click **Choose Folder** and select the model's folder, or choose a **.zip** of it. A **.usdz** already holds its files. If the folder has more than one model file, pick the right one in **Main file**. The dialog lists any file the model uses that was not uploaded. Materials that come with Isaac Sim, such as `OmniPBR.mdl`, need no file.
 
 Imported models appear as 3D pictures in the tray, in the colours and textures of their materials. Drag a picture onto the map to place the model. Right-drag a picture, or Shift-drag it on a trackpad, to turn it. Drag a placed model to move it. Right-click it to set its yaw or delete it, or press **Delete**. A placed model's top-view outline always counts in the AGV collision check.
+
+USD export and Isaac Sim push copy each placed model's geometry and materials into the file under `/World/Map/Equipment`, with static colliders, so the result does not depend on the source file. The files the models use go in an `allmaptousd_assets` folder next to the USD. **Export USD** saves them side by side in the folder you chose. **Save Map** stores the models, their files, and their positions in the zip.
 
 ## Supported maps
 

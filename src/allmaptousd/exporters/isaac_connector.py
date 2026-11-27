@@ -19,9 +19,12 @@ import socket
 import subprocess
 import tempfile
 import time
+import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from allmaptousd.model_assets import write_tree
 from allmaptousd.models import IsaacSimConfig
 
 _LOCAL_HOSTS = ("", "127.0.0.1", "localhost", "::1")
@@ -276,33 +279,79 @@ def _home_relative(path: str) -> str:
     return path[2:] if path.startswith("~/") else path
 
 
-def deliver_usd_file(usd_bytes: bytes, file_name: str, cfg: IsaacSimConfig) -> str:
-    """Place the USD next to Isaac Sim without going through the python cell.
-
-    Local hosts get a direct file write; remote hosts get ``ssh mkdir -p`` + ``scp``
-    (key-based login from ~/.ssh/config, same as the tunnel). Returns a description of the copy.
-    """
+def deliver_files(files: dict[str, bytes], cfg: IsaacSimConfig) -> str:
+    """Copy ``files`` (paths relative to ``remote_save_dir``; the first one is the main file) to the
+    Isaac host. Local hosts get direct file writes; remote hosts get ``ssh mkdir -p`` + ``scp``
+    (key-based login from ~/.ssh/config, same as the tunnel). Returns a description of the copy."""
+    main = next(iter(files))
     if _is_local_host(cfg.host):
         target_dir = Path(os.path.expanduser(cfg.remote_save_dir)).resolve()
-        target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / file_name).write_bytes(usd_bytes)
-        return f"local copy -> {target_dir / file_name}"
+        write_tree(target_dir, files)
+        return f"local copy -> {target_dir / main}"
 
     remote_dir = _home_relative(cfg.remote_save_dir)
     target = _ssh_target(cfg.host, cfg.ssh_user)
-    run_kw = dict(capture_output=True, text=True, timeout=cfg.timeout_sec, creationflags=_NO_WINDOW)
+    run_kw = dict(capture_output=True, text=True, timeout=max(cfg.timeout_sec, 120.0), creationflags=_NO_WINDOW)
 
     mk = subprocess.run(["ssh", *_SSH_OPTS, target, f"mkdir -p -- {shlex.quote(remote_dir)}"], **run_kw)
     if mk.returncode != 0:
         raise OSError(f"ssh mkdir failed ({target}): {mk.stderr.strip() or mk.returncode}")
 
     with tempfile.TemporaryDirectory() as tmp:
-        local = Path(tmp) / file_name
-        local.write_bytes(usd_bytes)
-        cp = subprocess.run(["scp", "-q", *_SSH_OPTS, str(local), f"{target}:{remote_dir}/{file_name}"], **run_kw)
+        write_tree(Path(tmp), files)
+        tops = sorted({rel.split("/")[0] for rel in files})  # folders included: one scp for all
+        cmd = ["scp", "-q", "-r", *_SSH_OPTS, *(str(Path(tmp) / t) for t in tops), f"{target}:{remote_dir}/"]
+        cp = subprocess.run(cmd, **run_kw)
     if cp.returncode != 0:
         raise OSError(f"scp failed ({target}): {cp.stderr.strip() or cp.returncode}")
-    return f"scp -> {target}:{remote_dir}/{file_name}"
+    extra = f" (+{len(files) - 1} model files)" if len(files) > 1 else ""
+    return f"scp -> {target}:{remote_dir}/{main}{extra}"
+
+
+# Writes files that travel inside a python cell into the save folder (paths stay inside it).
+_WRITE_FILES = """
+def _write_files(save_dir, packed):
+    for rel, blob in packed:
+        path = (save_dir / rel).resolve()
+        if save_dir not in path.parents:
+            raise ValueError(f"Refusing to write outside {save_dir}: {rel}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(zlib.decompress(base64.b64decode(blob)))
+""".strip()
+
+
+def _pack_files(files: dict[str, bytes] | None) -> list[tuple[str, str]]:
+    return [(rel, base64.b64encode(zlib.compress(data, 6)).decode("ascii")) for rel, data in (files or {}).items()]
+
+
+def _deliver_and_run(
+    cfg: IsaacSimConfig, files: dict[str, bytes], build_script: Callable[[bool], str], timeout: float,
+) -> tuple[dict[str, Any] | None, dict[str, Any], str, str]:
+    """Ship ``files`` (the main file first) to the Isaac host and run the cell ``build_script(inline)``.
+
+    The files travel inside the cell (inline), or are copied beforehand by :func:`deliver_files` when
+    ``transfer_mode`` says so or they exceed ``inline_limit_mb``. Returns (failure result or None,
+    cell response, transport, delivery)."""
+    size = sum(len(d) for d in files.values())
+    inline = not (cfg.transfer_mode == "file" or (
+        cfg.transfer_mode == "auto" and size > cfg.inline_limit_mb * 1024 * 1024))
+    delivery, transport = "inline", ""
+    try:
+        if not inline:
+            delivery = deliver_files(files, cfg)
+        script = build_script(inline)
+        conn_host, conn_port, transport = _resolve_endpoint(cfg)
+        resp = send_python_cell(conn_host, conn_port, script, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failure = {"ok": False, "message": f"Cannot deliver to Isaac Sim ({cfg.host}:{cfg.port}, {delivery}): {exc}"}
+        return failure, {}, transport, delivery
+    if resp.get("status") == "error":
+        return {
+            "ok": False,
+            "message": f"Isaac Sim execution failed [{resp.get('ename', 'Error')}]: {resp.get('evalue', '')}",
+            "traceback": "\n".join(resp.get("traceback") or []),
+        }, resp, transport, delivery
+    return None, resp, transport, delivery
 
 
 _FRAME_PUSHED_MAP = """
@@ -353,11 +402,13 @@ def build_push_script(
     usd_bytes: bytes | None,
     map_name: str,
     cfg: IsaacSimConfig,
+    files: dict[str, bytes] | None = None,
 ) -> str:
     """Build a Python cell that mounts the USD in the live stage.
 
-    With ``usd_bytes`` the file is embedded (base64) and written on the Isaac host first;
-    with ``None`` the file is expected to already be in ``remote_save_dir`` (see deliver_usd_file).
+    With ``usd_bytes`` the file is embedded (base64) and written on the Isaac host first, along with
+    ``files`` (textures etc. of the 3D models, paths relative to the USD); with ``None`` they are
+    expected to already be in ``remote_save_dir`` (see deliver_files).
     """
     safe_name = _sanitize_filename(map_name)
     write_line = (
@@ -365,12 +416,14 @@ def build_push_script(
         if usd_bytes is not None
         else "assert _usd_path.is_file(), f'USD not found on Isaac host: {_usd_path}'"
     )
+    packed = _pack_files(files if usd_bytes is not None else None)
+    write_files = f"{_WRITE_FILES}\n\n_write_files(_save_dir, {packed!r})" if packed else ""
     target_prim = cfg.target_prim_path.strip() or "/World/AGV_Map"
     if not target_prim.startswith("/"):
         target_prim = f"/{target_prim}"
 
     return f"""
-import base64, json, os
+import base64, json, os, zlib
 from pathlib import Path
 import omni.usd
 from pxr import Sdf, UsdGeom, UsdLux
@@ -379,6 +432,7 @@ _save_dir = Path(os.path.expanduser({cfg.remote_save_dir!r})).resolve()
 _save_dir.mkdir(parents=True, exist_ok=True)
 _usd_path = (_save_dir / "{safe_name}.usd").resolve()
 {write_line}
+{write_files}
 _usd_str = _usd_path.as_posix()
 
 _existing_layer = Sdf.Layer.Find(_usd_str)
@@ -443,32 +497,17 @@ def push_usd_to_isaac(
     usd_bytes: bytes,
     map_name: str,
     cfg: IsaacSimConfig,
+    files: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
-    """Transfer the generated USD to Isaac Sim and mount/open it in the live Stage."""
-    use_file = cfg.transfer_mode == "file" or (
-        cfg.transfer_mode == "auto" and len(usd_bytes) > cfg.inline_limit_mb * 1024 * 1024
+    """Transfer the generated USD (and ``files``, the textures etc. of its 3D models by their path
+    relative to the USD) to Isaac Sim and mount/open it in the live Stage."""
+    failure, resp, transport, delivery = _deliver_and_run(
+        cfg, {f"{_sanitize_filename(map_name)}.usd": usd_bytes, **(files or {})},
+        lambda inline: build_push_script(usd_bytes if inline else None, map_name, cfg, files),
+        cfg.timeout_sec,
     )
-    delivery = "inline"
-    try:
-        if use_file:
-            delivery = deliver_usd_file(usd_bytes, f"{_sanitize_filename(map_name)}.usd", cfg)
-        script = build_push_script(None if use_file else usd_bytes, map_name, cfg)
-        conn_host, conn_port, transport = _resolve_endpoint(cfg)
-        resp = send_python_cell(conn_host, conn_port, script, timeout=cfg.timeout_sec)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {
-            "ok": False,
-            "message": f"Cannot deliver to Isaac Sim ({cfg.host}:{cfg.port}, {delivery}): {exc}",
-        }
-
-    if resp.get("status") == "error":
-        tb = "\n".join(resp.get("traceback") or [])
-        return {
-            "ok": False,
-            "message": f"Isaac Sim execution failed [{resp.get('ename', 'Error')}]: {resp.get('evalue', '')}",
-            "traceback": tb,
-        }
-
+    if failure:
+        return failure
     parsed = _last_json_line(resp)
 
     via = " (SSH Tunnel)" if transport == "ssh_tunnel" else ""
@@ -488,3 +527,8 @@ def push_usd_to_isaac(
             + (" · View framed" if parsed.get("viewport_framed") else "")
         ),
     }
+
+
+# How far the automatic floor search looks around the Floor Elevation setting (metres).
+FLOOR_SEARCH_BELOW_M = 1.0
+FLOOR_SEARCH_ABOVE_M = 0.5

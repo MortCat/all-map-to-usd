@@ -1,7 +1,9 @@
-"""Imported 3D models (USD / STEP / STL), placement configuration, and web API."""
+"""Imported 3D models (USD / STEP / STL): normalization, export as copies, Save Map round trip, web API."""
 
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -101,16 +103,46 @@ def test_stl_model_units(tmp_path: Path) -> None:
         open_model_source("broken.stl", b"solid nothing here\nendsolid\n")
 
 
-def test_placements_reset_on_map_change() -> None:
+def test_placed_models_are_copied_into_export_and_saved_map(tmp_path: Path) -> None:
     session = MapSession()
     session.load(MapInputBundle.from_path(SAMPLE))
+    robot = import_model(open_model_source("robot.usda", _robot_usda(tmp_path)), [])
     box = import_model(open_model_source("box.stl", _box_stl()), [])
-    session.models[box.id] = box
-    placement = EquipmentPlacement(model_id=box.id, name="Box", x=3.0, y=4.0, yaw_deg=90.0)
-    session.rebuild(session.config.model_copy(update={"equipment": [placement]}))
-    assert session.config.equipment == [placement]
-    session.load(MapInputBundle.from_path(SAMPLE))
-    assert session.config.equipment == [] and session.models == {box.id: box}
+    session.models = {robot.id: robot, box.id: box}
+    session.rebuild(session.config.model_copy(update={"equipment": [
+        EquipmentPlacement(model_id=robot.id, name="Robot 1", x=3.0, y=4.0, yaw_deg=90.0),
+        EquipmentPlacement(model_id=box.id, name="Box", x=8.0, y=2.0),
+    ]}))
+
+    text = session.export_bytes(".usda").decode("utf-8")
+    assert "references" not in text and "robot.usda" not in text  # copies, not references
+    layer = Sdf.Layer.CreateAnonymous(".usda")
+    layer.ImportFromString(text)
+    stage = Usd.Stage.Open(layer)
+    bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default"])
+    placed = bbox.ComputeWorldBound(stage.GetPrimAtPath("/World/Map/Equipment/Robot_1")).ComputeAlignedRange()
+    assert placed.GetMin() == pytest.approx((2.5, 2.5, 0.0), abs=1e-6)  # turned 90°: 1 m x 3 m at (3, 4)
+    assert placed.GetMax() == pytest.approx((3.5, 5.5, 0.5), abs=1e-6)
+    cube = stage.GetPrimAtPath("/World/Map/Equipment/Robot_1/Model/Robot/A/Box/Geo")
+    bound = UsdShade.MaterialBindingAPI(cube).ComputeBoundMaterial()[0].GetPath()
+    assert bound.HasPrefix("/World/Map/Equipment/Robot_1")
+
+    from allmaptousd.exporters.ros_map import export_ros_map_zip
+
+    saved = export_ros_map_zip(session.built, session.config, "factory", session.models)
+    with zipfile.ZipFile(io.BytesIO(saved)) as zf:
+        assert {f"models/{robot.id}.usdc", f"models/{box.id}.usdc"} <= set(zf.namelist())
+    reopened = MapSession()
+    reopened.load(MapInputBundle(primary_filename="factory.zip", primary_bytes=saved))
+    assert set(reopened.models) == {robot.id, box.id}
+    assert reopened.models[robot.id].size == pytest.approx(robot.size)
+    assert [(e.name, e.x, e.y, e.yaw_deg) for e in reopened.config.equipment] == [
+        ("Robot 1", 3.0, 4.0, 90.0), ("Box", 8.0, 2.0, 0.0),
+    ]
+    assert reopened.export_bytes(".usda").count(b'def Xform "Robot_1"') == 1
+
+    reopened.load(MapInputBundle.from_path(SAMPLE))  # a different map: placements go, the library stays
+    assert reopened.config.equipment == [] and set(reopened.models) == {robot.id, box.id}
 
 
 def test_model_api(tmp_path: Path, monkeypatch) -> None:
@@ -134,12 +166,13 @@ def test_model_api(tmp_path: Path, monkeypatch) -> None:
     assert [m["id"] for m in client.get("/api/models").json()] == [model["id"]]
     config = web_server.state.session.config.model_dump(mode="json")
     config["equipment"] = [{"model_id": model["id"], "name": "Cube", "x": 1.0, "y": 1.0, "yaw_deg": 0.0}]
+    assert b"Equipment" in client.post("/api/export/usd?ext=usda", json=config).content
     payload = client.post("/api/rebuild", json=config).json()
     assert [m["id"] for m in payload["models"]] == [model["id"]]
-    assert payload["config"]["equipment"] == config["equipment"]
 
     assert client.delete(f"/api/models/{model['id']}").status_code == 200
-    assert client.get("/api/models").json() == []
+    missing = client.post("/api/export/usd", json=config)
+    assert missing.status_code == 400 and "no longer loaded" in missing.json()["detail"]
 
 
 def _cell_step(tmp_path: Path) -> bytes:

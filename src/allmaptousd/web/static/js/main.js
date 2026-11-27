@@ -20,6 +20,16 @@
     uploadFiles(e.dataTransfer.files);
   });
 
+  // Parameter edits only take effect on Rebuild: flag that until the next map payload arrives.
+  // (Seal Unknown rebuilds by itself and Zone Collision only changes the 2D check.)
+  const markRebuildNeeded = (e) => {
+    if (!mapData || ["sealUnknown", "forbiddenCollision"].includes(e.target.id)) return;
+    setRebuildPending(true);
+  };
+  const buildPanel = document.querySelector("#accBuild .acc-body");
+  buildPanel.addEventListener("input", markRebuildNeeded);
+  buildPanel.addEventListener("change", markRebuildNeeded);
+
   fetch("/api/isaac/config").then((r) => r.json()).then((cfg) => {
     isaacConfigBase = cfg;
     document.getElementById("isaacHost").value = cfg.host || "127.0.0.1";

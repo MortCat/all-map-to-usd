@@ -365,6 +365,29 @@ class ModelAsset:
             "textures": len(mesh.textures),
         }
 
+    def package_files(self) -> dict[str, bytes]:
+        """The model's files by their path next to a USD file that uses it."""
+        return {f"{ASSET_DIR}/{self.id}/{rel}": data for rel, data in self.files.items()}
+
+    def to_usdc(self) -> bytes:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.usdc"
+            self.layer.Export(str(path))
+            return path.read_bytes()
+
+    @classmethod
+    def from_usdc(cls, model_id: str, name: str, data: bytes, files: dict[str, bytes] | None = None) -> ModelAsset:
+        """Reload a model saved with :meth:`to_usdc` and its ``files`` (e.g. from a saved map)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.usdc"
+            path.write_bytes(data)
+            opened = Sdf.Layer.OpenAsAnonymous(str(path))
+            if opened is None or not opened.GetPrimAtPath(_MODEL):
+                raise ValueError(f"The saved model '{name}' is damaged.")
+            layer = Sdf.Layer.CreateAnonymous("model.usda")
+            layer.TransferContent(opened)
+            del opened
+        return _analyze(model_id, name, layer, recentre=False, files=dict(files or {}))
 
 
 def import_model(source: ModelSource, paths: list[str], unit: str = "auto", up_axis: str = "auto") -> ModelAsset:
@@ -694,7 +717,13 @@ def _mdl_dependencies(path: Path) -> list[Path]:
     return found
 
 
+def add_model_copy(stage: Usd.Stage, path: str, asset: ModelAsset) -> None:
+    """Copy the model's prims to ``path`` in the stage's root layer (its parent prim must exist)."""
+    if not Sdf.CopySpec(asset.layer, _MODEL, stage.GetRootLayer(), Sdf.Path(path)):
+        raise ValueError(f"The model '{asset.name}' could not be added to the USD file.")
+
+
 __all__ = [
     "ASSET_DIR", "MODEL_EXTENSIONS", "ModelAsset", "ModelSource", "UNIT_SCALES",
-    "asset_prefix", "import_model", "open_model_files", "open_model_source", "write_tree",
+    "add_model_copy", "asset_prefix", "import_model", "open_model_files", "open_model_source", "write_tree",
 ]

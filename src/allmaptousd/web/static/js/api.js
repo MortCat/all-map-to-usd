@@ -41,10 +41,36 @@ async function postJson(url, body, fallback) {
   return (await postMapRequest(url, body, fallback)).json();
 }
 
+function setRebuildPending(pending) {
+  document.getElementById("rebuildBadge").hidden = !pending;
+  document.getElementById("rebuildBtn").classList.toggle("pending", pending);
+}
+
+// Show the build settings the server used for a newly loaded map (saved maps and Isaac pulls bring their own).
+function applyBuildConfigToPanel(build) {
+  const values = {
+    reconMode: build.reconstruction_mode, gridRes: build.grid_resolution, wallHeight: build.wall_height,
+    forbiddenHeight: build.forbidden_height, morphClose: build.morph_close_cells, dilateCells: build.dilate_cells,
+    minCluster: build.min_cluster_cells, solidMaxArea: build.solid_fill_max_area_m2,
+    contourTol: build.contour_simplify_tol, originX: build.origin_x, originY: build.origin_y,
+    originYaw: build.origin_yaw_deg,
+  };
+  for (const [id, value] of Object.entries(values)) document.getElementById(id).value = value;
+  const toggles = {
+    fillSolid: build.fill_solid_obstacles, forbiddenCollision: build.include_forbidden_as_collision,
+    includeNav: build.include_navigation,
+  };
+  for (const [id, value] of Object.entries(toggles)) document.getElementById(id).checked = value;
+}
+
 function applyMapPayload(payload, shouldFit = true, newSource = null, { preserveVehicle = false } = {}) {
   mapData = payload;
   if (payload.models) syncModelLibrary(payload.models);
-  if (newSource) setPlacements(payload.config?.equipment);
+  if (newSource && payload.config) {
+    applyBuildConfigToPanel(payload.config);
+    setPlacements(payload.config.equipment);
+  }
+  setRebuildPending(false);  // the panel now matches the settings behind this payload
   if (newSource) resetEditor(newSource === "edit");
   document.getElementById("emptyOverlay").classList.add("hidden");
   const m = payload.metadata, b = payload.bounds;
@@ -85,7 +111,7 @@ function applyMapPayload(payload, shouldFit = true, newSource = null, { preserve
     updateIsaacPullRange();
   }
 
-  ["rebuildBtn", "exportUsdBtn", "exportUsdaBtn", "pushIsaacBtn"].forEach((id) => {
+  ["rebuildBtn", "exportUsdBtn", "exportUsdaBtn", "saveMapBtn", "pushIsaacBtn"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.disabled = false;
   });
@@ -162,31 +188,43 @@ function rebuildMap() {
   });
 }
 
-async function downloadUsd(ext) {
-  const res = await postMapRequest(`/api/export/usd?ext=${ext}`, collectBuildConfig(), "Export failed.");
-  const blob = await res.blob();
-  const cd = res.headers.get("Content-Disposition") || "";
-  const m = cd.match(/filename\*=UTF-8''([^;]+)/) || cd.match(/filename="([^"]+)"/);
-  const filename = m ? decodeURIComponent(m[1]) : `map_layout.${ext}`;
-  const savedPath = decodeURIComponent(res.headers.get("X-Saved-Path") || "");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(a.href);
-  const expEl = document.getElementById("exportStatus");
-  if (expEl && savedPath) {
-    expEl.dataset.state = "success";
-    expEl.textContent = `Saved: ${savedPath}`;
+// --- Export & Save: a Save As dialog asks where the file goes and what it is called ---
+const EXPORT_FOLDER_KEY = "allmaptousd.exportFolder";  // the dialog opens where the last export went
+
+function lastExportFolder() {
+  try { return localStorage.getItem(EXPORT_FOLDER_KEY) || ""; } catch { return ""; }
+}
+
+// POSTs the build settings to an export endpoint, which saves the file (and the files its 3D models
+// use) where the user chose. If the dialog cannot open, the file goes to the exports folder.
+async function saveExport(url, ext, [verb, done]) {
+  let target = { folder: "", name: "" };
+  try {
+    const name = (mapData?.metadata?.name || "map_layout").replace(/ /g, "_");
+    target = await postJson("/api/export/save-as", { ext, name, folder: lastExportFolder() });
+    if (!target.name) return;  // cancelled
+    try { localStorage.setItem(EXPORT_FOLDER_KEY, target.folder); } catch {}
+  } catch (err) {
+    showToast(`${err.message} Saving to the exports folder.`);
   }
-  showToast(savedPath ? `Exported to ${savedPath}` : `Exported: ${filename}`);
+  const query = new URLSearchParams({ ...target, overwrite: true, download: false });
+  const res = await postJson(`${url}${url.includes("?") ? "&" : "?"}${query}`, collectBuildConfig(), `${verb} failed.`);
+  const extra = res.files ? ` (+${res.files} model file${res.files > 1 ? "s" : ""} in allmaptousd_assets)` : "";
+  const expEl = document.getElementById("exportStatus");
+  expEl.dataset.state = "success";
+  expEl.textContent = `Saved: ${res.saved_path}${extra}`;
+  showToast(`${done} to ${res.saved_path}`);
 }
 
 function exportUsd(ext) {
-  return runMapRequest(() => downloadUsd(ext));
+  return runMapRequest(() => saveExport(`/api/export/usd?ext=${ext}`, ext, ["Export", "Exported"]));
 }
+
+// The ROS map zip doubles as the project file: dropping it on Map Source reopens it with its settings.
+function saveRosMap() {
+  return runMapRequest(() => saveExport("/api/export/ros-map", "zip", ["Save", "Saved"]));
+}
+
 // Full IsaacSimConfig as loaded from /api/isaac/config (see main.js). The panel only edits a few
 // fields; the rest (ssh_user, remote_save_dir, transfer_mode, ...) must round-trip unchanged,
 // because sync operations save the config back to isaac_config.json.
@@ -273,16 +311,6 @@ async function pullFromIsaac() {
     async () => {
       const data = await isaacMapRequest("pull", cfg);
       isaacConfigBase = cfg;
-      const build = data.config;
-      document.getElementById("gridRes").value = build.grid_resolution;
-      document.getElementById("reconMode").value = build.reconstruction_mode;
-      document.getElementById("morphClose").value = build.morph_close_cells;
-      document.getElementById("dilateCells").value = build.dilate_cells;
-      document.getElementById("minCluster").value = build.min_cluster_cells;
-      document.getElementById("fillSolid").checked = build.fill_solid_obstacles;
-      document.getElementById("originX").value = build.origin_x;
-      document.getElementById("originY").value = build.origin_y;
-      document.getElementById("originYaw").value = build.origin_yaw_deg;
       applyMapPayload(data, true, "loaded");
       const meta = data.metadata.extra;
       const skipped = meta.isaac_unsupported_prims ? ` · ${meta.isaac_unsupported_prims} unsupported geometry skipped` : "";

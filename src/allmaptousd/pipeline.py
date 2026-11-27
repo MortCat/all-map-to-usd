@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
-from allmaptousd.exporters.usd_exporter import export_to_usd, export_to_usd_bytes
+from allmaptousd.exporters.usd_exporter import export_to_usd, export_to_usd_bytes, placed_model_files
 from allmaptousd.geometry import reconstruct_obstacles
 from allmaptousd.geometry.editing import EditRaster, MapStroke, rasterize_edits
 from allmaptousd.model_assets import ModelAsset
@@ -47,14 +47,31 @@ class MapSession:
     _edit_raster: EditRaster | None = field(default=None, init=False)
 
     def load(self, bundle: MapInputBundle, format_hint: str = "auto", center_vehicle: bool = True) -> CanonicalMap:
-        return self.use(self.registry.parse(bundle, format_hint=format_hint), center_vehicle)
+        raw = self.registry.parse(bundle, format_hint=format_hint)
+        saved_models = raw.metadata.extra.pop("project_models", [])
+        saved = raw.metadata.extra.pop("project_build", None)
+        for item in saved_models:
+            if item["id"] not in self.models:
+                self.models[item["id"]] = ModelAsset.from_usdc(
+                    item["id"], item["name"], item["data"], item.get("files"))
+        if saved is None:
+            return self.use(raw, center_vehicle)
+        # A map saved by this app: its obstacles are already final, so the steps that grow them
+        # (closing gaps, dilation, sealing) are switched off; the other settings and the AGV pose return.
+        config = BuildConfig.model_validate({
+            **saved, "grid_resolution": raw.metadata.resolution,
+            "morph_close_cells": 0, "dilate_cells": 0, "seal_unknown": False,
+        })
+        return self.use(raw, center_vehicle=False, config=config, keep_equipment=True)
 
     def use(
         self, raw: CanonicalMap, center_vehicle: bool = True, *, config: BuildConfig | None = None,
+        keep_equipment: bool = False,
     ) -> CanonicalMap:
-        """Adopt an already-parsed map; by default the AGV proxy starts at the map centre."""
+        """Adopt an already-parsed map and clear placements unless the map has saved equipment."""
         config = (config or self.config).model_copy(deep=True)
-        config.equipment = []
+        if not keep_equipment:
+            config.equipment = []
         if center_vehicle:
             cx, cy = raw.compute_bounds(config.dropped_layers()).center
             config.vehicle_proxy.pos_x, config.vehicle_proxy.pos_y = round(cx, 3), round(cy, 3)
@@ -108,7 +125,11 @@ class MapSession:
         return self.built
 
     def export_bytes(self, extension: str = ".usd") -> bytes:
-        return export_to_usd_bytes(self._require_built(), self.config, extension=extension)
+        return export_to_usd_bytes(self._require_built(), self.config, extension=extension, models=self.models)
+
+    def export_package(self, extension: str = ".usd") -> tuple[bytes, dict[str, bytes]]:
+        """The USD and the files its 3D models use, by their path relative to the USD."""
+        return self.export_bytes(extension), placed_model_files(self.config, self.models)
 
     def export_file(self, path: str | Path) -> Path:
-        return export_to_usd(self._require_built(), self.config, path)
+        return export_to_usd(self._require_built(), self.config, path, self.models)

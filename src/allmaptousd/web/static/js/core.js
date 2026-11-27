@@ -68,6 +68,7 @@ function stepInput(id, delta, decimals = 2, cb = null) {
   const next = Math.max(min, Math.min(max, cur + delta));
   el.value = decimals > 0 ? next.toFixed(decimals) : Math.round(next);
   if (cb) cb();
+  else el.dispatchEvent(new Event("input", { bubbles: true }));  // lets panel listeners see stepper changes
 }
 
 (function setupSidebarResize() {

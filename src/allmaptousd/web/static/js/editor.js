@@ -346,7 +346,6 @@ emptyMapForm.addEventListener("submit", (event) => {
     buttons.forEach((button) => { button.disabled = true; });
     try {
       const data = await postJson("/api/empty-map", request);
-      document.getElementById("gridRes").value = data.config.grid_resolution;
       emptyMapDialog.close();
       applyMapPayload(data, true, "edit");
     } catch (err) {

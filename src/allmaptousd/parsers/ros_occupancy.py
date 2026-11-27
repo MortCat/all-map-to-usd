@@ -11,8 +11,11 @@ import cv2
 import numpy as np
 import yaml
 
-from allmaptousd.models import CanonicalMap, MapMetadata
+from allmaptousd.models import Bounds2D, CanonicalMap, MapMetadata, RoutePath, Station, Zone, as_points
 from allmaptousd.parsers.base import MapInputBundle, grid_to_points, load_gray_image
+
+# Extra YAML section written by exporters.ros_map (map_server ignores unknown keys).
+PROJECT_KEY = "allmaptousd"
 
 
 def _classify_cells(
@@ -67,7 +70,8 @@ class RosOccupancyParser:
 
     def _load_yaml_and_image(
         self, bundle: MapInputBundle
-    ) -> tuple[dict[str, Any], bytes, str]:
+    ) -> tuple[dict[str, Any], bytes, str, dict[str, bytes]]:
+        """(map yaml, image bytes, default map name, the saved 3D models a project zip carries)."""
         ext = Path(bundle.primary_filename).suffix.lower()
 
         if ext == ".zip":
@@ -90,7 +94,8 @@ class RosOccupancyParser:
                     raise ValueError(
                         f"Image '{image_ref}' referenced by '{yaml_name}' was not found in ZIP."
                     )
-                return meta, img_bytes, Path(yaml_name).stem
+                models = {n: zf.read(n) for n in zf.namelist() if n.startswith("models/") and not n.endswith("/")}
+                return meta, img_bytes, Path(yaml_name).stem, models
 
         meta = yaml.safe_load(bundle.primary_bytes.decode("utf-8-sig"))
         if not isinstance(meta, dict) or "image" not in meta:
@@ -103,7 +108,7 @@ class RosOccupancyParser:
         # 1. Check uploaded companion files
         for fname, fbytes in bundle.companion_files.items():
             if fname == image_ref or Path(fname).name == image_basename:
-                return meta, fbytes, Path(bundle.primary_filename).stem
+                return meta, fbytes, Path(bundle.primary_filename).stem, {}
 
         # 2. Check sibling file on disk if loaded from path
         if bundle.source_dir is not None:
@@ -111,7 +116,7 @@ class RosOccupancyParser:
             if not candidate.exists():
                 candidate = bundle.source_dir / image_basename
             if candidate.exists():
-                return meta, candidate.read_bytes(), Path(bundle.primary_filename).stem
+                return meta, candidate.read_bytes(), Path(bundle.primary_filename).stem, {}
 
         raise ValueError(
             f"ROS map image '{image_ref}' is missing. "
@@ -119,7 +124,7 @@ class RosOccupancyParser:
         )
 
     def parse(self, bundle: MapInputBundle) -> CanonicalMap:
-        meta, img_bytes, default_name = self._load_yaml_and_image(bundle)
+        meta, img_bytes, default_name, model_files = self._load_yaml_and_image(bundle)
 
         resolution = float(meta.get("resolution", 0.05))
         origin = meta.get("origin", [0.0, 0.0, 0.0])
@@ -139,7 +144,7 @@ class RosOccupancyParser:
         points = grid_to_points(occupied, resolution, ox, oy, oyaw)
         frontier_points = grid_to_points(frontier, resolution, ox, oy, oyaw)
 
-        return CanonicalMap(
+        canonical = CanonicalMap(
             metadata=MapMetadata(
                 name=str(meta.get("map_name") or default_name),
                 source_format=self.format_id,
@@ -160,3 +165,53 @@ class RosOccupancyParser:
             points=points,
             frontier_points=frontier_points,
         )
+        project = meta.get(PROJECT_KEY)
+        if isinstance(project, dict):
+            _restore_project(canonical, project, resolution, (ox, oy, oyaw), (width_px, height_px), model_files)
+        return canonical
+
+
+def _restore_project(
+    canonical: CanonicalMap, project: dict, res: float, origin: tuple[float, float, float], size: tuple[int, int],
+    model_files: dict[str, bytes],
+) -> None:
+    """Bring back what an AllMapToUSD save keeps next to the occupancy image.
+
+    The saved build settings and 3D models travel in ``metadata.extra["project_build"]`` and
+    ``["project_models"]`` for ``MapSession`` to apply.
+    """
+    try:
+        canonical.forbidden_zones = [
+            Zone(name=str(z["name"]), zone_type=str(z.get("zone_type", "forbidden")), vertices=as_points(z["vertices"]))
+            for z in project.get("forbidden_zones") or []
+        ]
+        canonical.stations = [
+            Station(name=str(s["name"]), x=float(s["x"]), y=float(s["y"]), yaw=float(s.get("yaw", 0.0)),
+                    kind=str(s.get("kind", "Station")))
+            for s in project.get("stations") or []
+        ]
+        canonical.paths = [
+            RoutePath(name=str(p["name"]), points=as_points(p["points"]), kind=str(p.get("kind", "Path")))
+            for p in project.get("paths") or []
+        ]
+        models = [
+            {
+                "id": str(m["id"]), "name": str(m["name"]), "data": model_files[str(m["file"])],
+                "files": {
+                    n[len(f"models/{m['id']}/"):]: data for n, data in model_files.items()
+                    if n.startswith(f"models/{m['id']}/")
+                },
+            }
+            for m in project.get("models") or []
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"The saved '{PROJECT_KEY}' section of this map is damaged: {exc}") from exc
+    ox, oy, yaw = origin
+    if abs(yaw) < 1e-12:  # keep the full saved canvas, including empty space around the obstacles
+        canonical.drawing_bounds = Bounds2D(ox, oy, ox + size[0] * res, oy + size[1] * res)
+    canonical.metadata.name = str(project.get("map_name") or canonical.metadata.name)
+    canonical.metadata.extra["saved_source_format"] = str(project.get("source_format", ""))
+    if isinstance(project.get("build"), dict):
+        canonical.metadata.extra["project_build"] = project["build"]
+    if models:
+        canonical.metadata.extra["project_models"] = models

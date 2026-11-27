@@ -133,7 +133,11 @@ def test_fastapi_endpoints(tmp_path: Path, monkeypatch) -> None:
 
     from fastapi.testclient import TestClient
 
-    client = TestClient(web_server.app)
+    client = TestClient(web_server.app, base_url="http://127.0.0.1:8765")
+    # DNS-rebinding guard: a foreign Host is refused, and so is an oversized upload
+    assert TestClient(web_server.app, base_url="http://attacker.example").get("/").status_code == 400
+    huge = {"content-length": str(web_server.MAX_REQUEST_BYTES + 1)}
+    assert client.post("/api/upload", headers=huge).status_code == 413
     index = client.get("/")
     assert index.status_code == 200 and "AllMapToUSD" in index.text
     # every stylesheet / script the page references is served
@@ -483,10 +487,18 @@ def test_isaac_file_transfer_local_and_scp(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(ic.subprocess, "run", _fake_run)
     remote = IsaacSimConfig(host="10.0.0.5", ssh_user="isaac", remote_save_dir="~/allmaptousd_maps")
-    desc = ic.deliver_usd_file(b"data", "m.usd", remote)
+    desc = ic.deliver_files({"m.usd": b"data"}, remote)
     assert calls[0][0] == "ssh" and calls[0][-1] == "mkdir -p -- allmaptousd_maps"
-    assert calls[1][0] == "scp" and calls[1][-1] == "isaac@10.0.0.5:allmaptousd_maps/m.usd"
+    assert calls[1][0] == "scp" and calls[1][-1] == "isaac@10.0.0.5:allmaptousd_maps/"
+    assert Path(calls[1][-2]).name == "m.usd"
     assert desc == "scp -> isaac@10.0.0.5:allmaptousd_maps/m.usd"
+
+    # With model files (textures, ...): one recursive scp of the USD and the assets folder.
+    calls.clear()
+    desc = ic.deliver_files({"m.usd": b"usd", "allmaptousd_assets/abc/wood.png": b"png"}, remote)
+    assert calls[1][:3] == ["scp", "-q", "-r"] and calls[1][-1] == "isaac@10.0.0.5:allmaptousd_maps/"
+    assert sorted(Path(a).name for a in calls[1][-3:-1]) == ["allmaptousd_assets", "m.usd"]
+    assert desc == "scp -> isaac@10.0.0.5:allmaptousd_maps/m.usd (+1 model files)"
 
 
 def _polygon_area(poly: np.ndarray) -> float:
@@ -602,3 +614,65 @@ def test_seer_forbidden_area_keywords(area: dict, forbidden: bool) -> None:
     from allmaptousd.parsers.seer_smap import _is_forbidden_area
 
     assert _is_forbidden_area(area) is forbidden
+
+
+def _pgm(zip_bytes: bytes) -> np.ndarray:
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        name = next(n for n in zf.namelist() if n.endswith(".pgm"))
+        return np.asarray(Image.open(io.BytesIO(zf.read(name))))
+
+
+@pytest.mark.parametrize("mode", ["contour_polygon", "aabb"])
+def test_saved_ros_map_reopens_with_its_settings(tmp_path: Path, monkeypatch, mode: str) -> None:
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from allmaptousd.models import RoutePath, Station, VehicleProxyConfig, Zone
+
+    monkeypatch.setattr(web_server, "EXPORT_DIR", tmp_path / "exports")
+    client = TestClient(web_server.app, base_url="http://127.0.0.1:8765")
+    sample = Path(__file__).resolve().parents[1] / "sample_maps" / "sample_factory.yaml"
+    raw = create_default_registry().parse(MapInputBundle.from_path(sample))
+    raw.forbidden_zones.append(Zone("Keep out", np.array([[1.0, 1.0], [3.0, 1.0], [3.0, 2.5]])))
+    raw.stations.append(Station("Charger", 2.0, 3.0, 0.5, "ChargePoint"))
+    raw.paths.append(RoutePath("Main", np.array([[0.5, 0.5], [6.0, 0.5], [6.0, 4.0]])))
+    config = BuildConfig(
+        reconstruction_mode=mode, wall_height=3.0, dilate_cells=1,
+        vehicle_proxy=VehicleProxyConfig(pos_x=4.0, pos_y=5.0, yaw_deg=30.0),
+    )
+    web_server.state.session.use(raw, center_vehicle=False, config=config)
+    first = web_server.state.session.built
+
+    def save() -> bytes:
+        resp = client.post("/api/export/ros-map", json=web_server.state.session.config.model_dump(mode="json"))
+        assert resp.status_code == 200 and resp.headers["content-type"] == "application/zip"
+        assert resp.headers["X-Saved-Path"].endswith(".zip")
+        return resp.content
+
+    def reopen(data: bytes) -> dict:
+        resp = client.post("/api/upload", files={"files": ("saved.zip", data, "application/zip")})
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    saved = save()
+    with zipfile.ZipFile(io.BytesIO(saved)) as zf:  # a plain Nav2 map_server map
+        meta = yaml.safe_load(zf.read(next(n for n in zf.namelist() if n.endswith(".yaml"))))
+    assert meta["mode"] == "trinary" and set(np.unique(_pgm(saved))) <= {0, 254}
+
+    payload = reopen(saved)
+    session = web_server.state.session
+    restored = session.built
+    assert payload["metadata"]["source_format"] == "ros_occupancy"
+    assert session.config.reconstruction_mode == mode and session.config.wall_height == 3.0
+    vp = session.config.vehicle_proxy
+    assert (vp.pos_x, vp.pos_y, vp.yaw_deg) == (4.0, 5.0, 30.0)
+    assert [z.name for z in restored.forbidden_zones] == ["Keep out"]
+    np.testing.assert_allclose(restored.forbidden_zones[0].vertices, raw.forbidden_zones[0].vertices)
+    assert [(s.name, s.x, s.y, s.kind) for s in restored.stations] == [("Charger", 2.0, 3.0, "ChargePoint")]
+    np.testing.assert_allclose(restored.paths[0].points, raw.paths[0].points)
+    # The dilation is in the saved cells already: reopening must not grow the obstacles again.
+    assert session.config.dilate_cells == 0
+    np.testing.assert_allclose(restored.obstacle_boxes.sum(), first.obstacle_boxes.sum(), atol=1e-6)
+    assert len(restored.obstacle_polygons) == len(first.obstacle_polygons)
+
+    assert np.array_equal(_pgm(save()), _pgm(saved))  # save -> reopen -> save changes nothing

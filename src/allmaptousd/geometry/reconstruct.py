@@ -269,10 +269,10 @@ def _height_groups(canonical: CanonicalMap, config: BuildConfig) -> list[tuple[f
 
 
 def _reconstruct_points(
-    pts: np.ndarray, config: BuildConfig, edits: EditRaster | None,
-    source_grids: list[OccupancyGrid] | None = None,
+    pts: np.ndarray, config: BuildConfig, edits: EditRaster | None, grids_out: list[OccupancyGrid],
 ) -> tuple[list[np.ndarray], np.ndarray, float]:
-    """Rasterize one point group and rebuild it as (polygons, boxes, effective_resolution)."""
+    """Rasterize one point group and rebuild it as (polygons, boxes, effective_resolution).
+    The occupied grid it was rebuilt from is appended to ``grids_out``."""
     res = float(config.grid_resolution)
     pad = max(2, config.morph_close_cells + config.dilate_cells + 1) * res
     # The extra half cell puts grid-aligned inputs (occupancy-grid cell centres) in the middle of
@@ -287,9 +287,8 @@ def _reconstruct_points(
         )
 
     rows, cols = _grid_shape(res)
-    max_cells = 4096 * 4096
-    if rows * cols > max_cells:
-        res = round(res * math.sqrt((rows * cols) / max_cells), 4)
+    if rows * cols > MAX_EDIT_CELLS:
+        res = round(res * math.sqrt((rows * cols) / MAX_EDIT_CELLS), 4)
         rows, cols = _grid_shape(res)
 
     grid = np.zeros((rows, cols), dtype=np.uint8)
@@ -324,9 +323,9 @@ def _reconstruct_points(
                 grid[affected_cells] = 0
             exact_grid[er, ec] = 0
 
-    if source_grids is not None and (grid.any() or exact_grid.any()):
+    if grid.any() or exact_grid.any():
         occupied = grid if exact_grid is grid else grid | exact_grid
-        source_grids.append(OccupancyGrid(occupied, np.array([min_x, min_y]), res))
+        grids_out.append(OccupancyGrid(occupied, np.array([min_x, min_y]), res))
 
     if config.reconstruction_mode == "contour_polygon":
         polys = _reconstruct_contour_polygons(
@@ -471,7 +470,8 @@ def reconstruct_obstacles(
     eff_res = float(config.grid_resolution)
 
     eraser = edits if edits is not None and np.any(edits.cells == ERASE) else None
-    source_grids = [] if config.fill_solid_obstacles and edits is not None and np.any(edits.cells == DRAW) else None
+    joint_fill = config.fill_solid_obstacles and edits is not None and np.any(edits.cells == DRAW)
+    source_grids: list[OccupancyGrid] = []
     for height, pts in _height_groups(canonical, config):
         g_polys, g_boxes, res = _reconstruct_points(pts, config, eraser, source_grids)
         polygons += g_polys
@@ -486,7 +486,7 @@ def reconstruct_obstacles(
     if edits is not None:
         drawn = edits.cells == DRAW
         occupied = drawn
-        if source_grids is not None:
+        if joint_fill:
             filled = _joint_cavity_fill(
                 OccupancyGrid(drawn.astype(np.uint8), edits.origin, edits.resolution),
                 edits.cells == ERASE, source_grids, config.solid_fill_max_area_m2,
@@ -516,6 +516,7 @@ def reconstruct_obstacles(
     canonical.obstacle_polygon_heights = poly_heights
     canonical.obstacle_boxes = np.concatenate(boxes)
     canonical.obstacle_box_heights = box_heights
+    canonical.obstacle_grids = [tuple(g) for g in source_grids]  # drawn/filled cells are in the boxes
 
     extra = canonical.metadata.extra
     extra["reconstructed_polygon_count"] = len(polygons)

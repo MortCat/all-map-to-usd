@@ -109,6 +109,9 @@ class CanonicalMap:
     obstacle_polygon_heights: list[float] = field(default_factory=list)
     obstacle_boxes: np.ndarray = field(default_factory=lambda: _empty(4))  # (B, 4) x0,y0,x1,y1
     obstacle_box_heights: list[float] = field(default_factory=list)
+    # The occupancy grids the obstacles were traced from, as (cells, origin_xy, resolution) with
+    # row 0 = min y: what a saved map stores, since tracing them again would not change them.
+    obstacle_grids: list[tuple[np.ndarray, np.ndarray, float]] = field(default_factory=list)
     drawing_bounds: Bounds2D | None = None
     drawn_points: np.ndarray = field(default_factory=lambda: _empty(2))  # sampled for the viewer
 

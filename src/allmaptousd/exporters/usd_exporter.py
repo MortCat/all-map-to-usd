@@ -4,7 +4,7 @@ Stage layout::
 
     /World                 PhysicsScene, Looks (materials), Lighting
     /World/Environment     Ground (output frame applied)
-    /World/Map             Obstacles, ForbiddenZones, Navigation (output frame applied)
+    /World/Map             Obstacles, ForbiddenZones, Navigation, Equipment (output frame applied)
     /World/TestVehicle     AGV_Proxy (optional)
 """
 
@@ -13,12 +13,14 @@ from __future__ import annotations
 import math
 import re
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
 from allmaptousd.geometry.reconstruct import triangulate_polygon
+from allmaptousd.model_assets import ModelAsset, add_model_copy, write_tree
 from allmaptousd.models import BuildConfig, CanonicalMap
 
 # name -> (diffuse color, opacity, roughness): high-contrast industrial floor vs bright walls
@@ -101,20 +103,31 @@ def _add_extruded_polygon(
     n = len(pts2d)
     # Bottom ring (0..n-1) at z=0, top ring (n..2n-1) at z=height
     points = [Gf.Vec3f(x, y, 0.0) for x, y in pts2d] + [Gf.Vec3f(x, y, float(height)) for x, y in pts2d]
-    counts = [3] * (2 * len(tris)) + [4] * n
+    counts = [3] * (2 * len(tris))
     indices: list[int] = []
+    # Face-varying normals keep the edges hard; shared vertices would otherwise be smooth-shaded round.
+    normals = [Gf.Vec3f(0, 0, 1)] * (3 * len(tris)) + [Gf.Vec3f(0, 0, -1)] * (3 * len(tris))
     for a, b, c in tris:
         indices += (n + a, n + b, n + c)  # top, CCW seen from +Z
     for a, b, c in tris:
         indices += (a, c, b)  # bottom, outward normal -Z
     for i in range(n):
         j = (i + 1) % n
-        indices += (i, j, n + j, n + i)  # sides
+        dx, dy = pts2d[j][0] - pts2d[i][0], pts2d[j][1] - pts2d[i][1]
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            continue
+        counts.append(4)
+        indices += (i, j, n + j, n + i)  # side wall of the CCW outline: outward normal (dy, -dx)
+        normals += [Gf.Vec3f(dy / length, -dx / length, 0)] * 4
 
     mesh = UsdGeom.Mesh.Define(stage, path)
     mesh.CreatePointsAttr(points)
+    mesh.CreateExtentAttr(UsdGeom.PointBased.ComputeExtent(points))
     mesh.CreateFaceVertexCountsAttr(counts)
     mesh.CreateFaceVertexIndicesAttr(indices)
+    mesh.CreateNormalsAttr(normals)
+    mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
     mesh.CreateSubdivisionSchemeAttr("none")
     _bind(mesh, material)
     if collision:
@@ -235,6 +248,38 @@ def _add_navigation(stage: Usd.Stage, canonical: CanonicalMap, material: UsdShad
         _bind(curve, material)
 
 
+def _add_equipment(
+    stage: Usd.Stage, config: BuildConfig, models: Mapping[str, ModelAsset], root: str = "/World/Map/Equipment",
+) -> None:
+    """Copy the prims of each placed 3D model into the exported stage."""
+    if not config.equipment:
+        return
+    UsdGeom.Xform.Define(stage, root)
+    used: set[str] = set()
+    for idx, item in enumerate(config.equipment):
+        asset = models.get(item.model_id)
+        if asset is None:
+            raise ValueError(
+                f"The 3D model of '{item.name}' is no longer loaded. Import it again or remove it from the map."
+            )
+        path = f"{root}/{_unique_name(item.name, f'Equipment_{idx + 1}', used)}"
+        xf = UsdGeom.Xform.Define(stage, path)
+        api = UsdGeom.XformCommonAPI(xf)
+        api.SetTranslate(Gf.Vec3d(float(item.x), float(item.y), 0.0))
+        api.SetRotate(Gf.Vec3f(0.0, 0.0, float(item.yaw_deg)))
+        add_model_copy(stage, f"{path}/Model", asset)
+
+
+def placed_model_files(config: BuildConfig, models: Mapping[str, ModelAsset]) -> dict[str, bytes]:
+    """Files the placed models use, by their path relative to the exported USD
+    (``allmaptousd_assets/<model id>/...``, matching the asset paths in the models)."""
+    files: dict[str, bytes] = {}
+    for model_id in sorted({item.model_id for item in config.equipment}):
+        if model_id in models:
+            files.update(models[model_id].package_files())
+    return files
+
+
 def _add_vehicle_proxy(stage: Usd.Stage, config: BuildConfig, mats) -> None:
     """Parametric AGV footprint box with an orange +X heading strip (visual only, no collider)."""
     vp = config.vehicle_proxy
@@ -253,8 +298,13 @@ def _add_vehicle_proxy(stage: Usd.Stage, config: BuildConfig, mats) -> None:
     )
 
 
-def export_to_usd(canonical: CanonicalMap, config: BuildConfig, output_path: str | Path) -> Path:
-    """Build a clean Isaac Sim-ready USD stage from a reconstructed CanonicalMap."""
+def export_to_usd(
+    canonical: CanonicalMap, config: BuildConfig, output_path: str | Path,
+    models: Mapping[str, ModelAsset] | None = None, *, write_files: bool = True,
+) -> Path:
+    """Build a clean Isaac Sim-ready USD stage from a reconstructed CanonicalMap.
+    ``models`` holds the 3D models that ``config.equipment`` places on the map; the files they use
+    (textures, materials) are written next to the USD unless ``write_files`` is off."""
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
@@ -275,17 +325,24 @@ def export_to_usd(canonical: CanonicalMap, config: BuildConfig, output_path: str
     _add_obstacles(stage, canonical, config, mats)
     if config.include_navigation:
         _add_navigation(stage, canonical, mats["Navigation"])
+    _add_equipment(stage, config, models or {})
     if config.vehicle_proxy.enabled:
         _add_vehicle_proxy(stage, config, mats)
 
     stage.GetRootLayer().Save()
+    if write_files:
+        write_tree(out.parent, placed_model_files(config, models or {}))
     return out
 
 
-def export_to_usd_bytes(canonical: CanonicalMap, config: BuildConfig, extension: str = ".usd") -> bytes:
+def export_to_usd_bytes(
+    canonical: CanonicalMap, config: BuildConfig, extension: str = ".usd",
+    models: Mapping[str, ModelAsset] | None = None,
+) -> bytes:
     """Export a USD stage to bytes (.usd / .usdc binary Crate or .usda ASCII)."""
     ext = extension if extension.startswith(".") else f".{extension}"
     if ext not in (".usd", ".usda", ".usdc"):
         ext = ".usd"
     with tempfile.TemporaryDirectory() as tmpdir:
-        return export_to_usd(canonical, config, Path(tmpdir) / f"map_layout{ext}").read_bytes()
+        path = export_to_usd(canonical, config, Path(tmpdir) / f"map_layout{ext}", models, write_files=False)
+        return path.read_bytes()
