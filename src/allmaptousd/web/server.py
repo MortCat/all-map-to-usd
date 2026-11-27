@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Annotated, Literal
 from urllib.parse import quote
+from uuid import uuid4
 
 import numpy as np
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -18,6 +19,7 @@ from allmaptousd.exporters import check_isaac_connection, push_usd_to_isaac
 from allmaptousd.exporters.isaac_connector import pull_stage_slice
 from allmaptousd.geometry.editing import MapStroke
 from allmaptousd.geometry.isaac_map import map_from_stage_slice
+from allmaptousd.model_assets import ModelSource, import_model, open_model_files, open_model_source
 from allmaptousd.models import Bounds2D, BuildConfig, CanonicalMap, IsaacSimConfig, MapMetadata
 from allmaptousd.parsers import MapInputBundle
 from allmaptousd.pipeline import MapSession, NoMapLoaded
@@ -92,6 +94,22 @@ class AppState:
         self.session = MapSession()
         self.map_lock = RLock()
         self.isaac_config = self._load_isaac_config()
+        # Uploaded 3D model files waiting for the user to pick parts (newest last, a few kept)
+        self.model_sources: dict[str, ModelSource] = {}
+
+    def add_model_source(self, source: ModelSource) -> str:
+        token = uuid4().hex
+        with self.map_lock:
+            self.model_sources[token] = source
+            while len(self.model_sources) > 3:
+                self.model_sources.pop(next(iter(self.model_sources))).close()
+        return token
+
+    def model_source(self, token: str) -> ModelSource:
+        source = self.model_sources.get(token)
+        if source is None:
+            raise HTTPException(status_code=404, detail="The uploaded model has expired. Choose the file again.")
+        return source
 
     @staticmethod
     def _load_isaac_config() -> IsaacSimConfig:
@@ -111,6 +129,7 @@ class AppState:
             "edit_resolution": self.session.edit_resolution,
             "can_undo": self.session.can_undo,
             "can_redo": self.session.can_redo,
+            "models": [m.summary() for m in self.session.models.values()],
         }
 
     def check_map_revision(self, revision: str | None) -> None:
@@ -280,6 +299,85 @@ def export_usd(config: BuildConfig, ext: str = "usd", x_map_revision: MapRevisio
             "X-Saved-Path": quote(str(saved_path), safe=":/\\"),
         },
     )
+
+
+class ModelSelectRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=64)
+    main: str = Field(min_length=1, max_length=4096)
+
+
+class ModelImportRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=64)
+    paths: list[str] = Field(default_factory=list, max_length=4000)  # empty: the whole model
+    unit: Literal["auto", "m", "cm", "mm", "in"] = "auto"
+    up_axis: Literal["auto", "z", "y"] = "auto"
+
+
+@app.post("/api/models/inspect")
+def inspect_model(files: list[UploadFile] = File(...)) -> dict:
+    """Open an uploaded model and list its parts for the import dialog. The upload is one USD / STEP /
+    STL file, a .zip, or a folder (each file named by its path in the folder)."""
+    try:
+        if len(files) == 1:
+            source = open_model_source(files[0].filename or "model", files[0].file.read())
+        else:
+            source = open_model_files({f.filename or f"file_{i}": f.file.read() for i, f in enumerate(files)})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"token": state.add_model_source(source), **source.describe()}
+
+
+@app.post("/api/models/select")
+def select_model_file(req: ModelSelectRequest) -> dict:
+    """Use another model file of the same upload (a folder or zip holding several)."""
+    source = state.model_source(req.token)
+    try:
+        source.select(req.main)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"token": req.token, **source.describe()}
+
+
+@app.post("/api/models/import")
+def import_model_parts(req: ModelImportRequest) -> dict:
+    source = state.model_source(req.token)
+    try:
+        asset = import_model(source, req.paths, req.unit, req.up_axis)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with state.map_lock:
+        state.session.models[asset.id] = asset
+    return asset.summary()
+
+
+@app.get("/api/models")
+def list_models() -> list[dict]:
+    return [m.summary() for m in state.session.models.values()]
+
+
+@app.get("/api/models/{model_id}/preview")
+def model_preview(model_id: str) -> dict:
+    asset = state.session.models.get(model_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="This model is no longer loaded.")
+    return asset.preview()
+
+
+@app.get("/api/models/{model_id}/textures/{index}")
+def model_texture(model_id: str, index: int) -> Response:
+    """A texture of the model's preview (PNG, at most 512 px)."""
+    asset = state.session.models.get(model_id)
+    textures = asset.preview_mesh.textures if asset is not None else []
+    if not 0 <= index < len(textures):
+        raise HTTPException(status_code=404, detail="No such texture.")
+    return Response(content=textures[index], media_type="image/png", headers={"Cache-Control": "max-age=3600"})
+
+
+@app.delete("/api/models/{model_id}")
+def delete_model(model_id: str) -> dict:
+    with state.map_lock:
+        state.session.models.pop(model_id, None)
+    return {"deleted": model_id}
 
 
 @app.get("/api/isaac/config")

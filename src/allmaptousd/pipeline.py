@@ -19,6 +19,7 @@ from uuid import uuid4
 from allmaptousd.exporters.usd_exporter import export_to_usd, export_to_usd_bytes
 from allmaptousd.geometry import reconstruct_obstacles
 from allmaptousd.geometry.editing import EditRaster, MapStroke, rasterize_edits
+from allmaptousd.model_assets import ModelAsset
 from allmaptousd.models import BuildConfig, CanonicalMap
 from allmaptousd.parsers import MapInputBundle, ParserRegistry, create_default_registry
 
@@ -29,7 +30,10 @@ class NoMapLoaded(RuntimeError):
 
 @dataclass
 class MapSession:
-    """One loaded map: the parsed input (``raw``), the current build config, and its result."""
+    """One loaded map: the parsed input (``raw``), the current build config, and its result.
+
+    ``models`` is the library of imported 3D models; it stays when another map is loaded.
+    """
 
     registry: ParserRegistry = field(default_factory=create_default_registry)
     config: BuildConfig = field(default_factory=BuildConfig)
@@ -37,6 +41,7 @@ class MapSession:
     built: CanonicalMap | None = None
     edit_resolution: float = 0.05
     edit_revision: str = field(default_factory=lambda: uuid4().hex)
+    models: dict[str, ModelAsset] = field(default_factory=dict)
     _strokes: list[MapStroke] = field(default_factory=list, init=False)
     _edit_cursor: int = field(default=0, init=False)
     _edit_raster: EditRaster | None = field(default=None, init=False)
@@ -49,6 +54,7 @@ class MapSession:
     ) -> CanonicalMap:
         """Adopt an already-parsed map; by default the AGV proxy starts at the map centre."""
         config = (config or self.config).model_copy(deep=True)
+        config.equipment = []
         if center_vehicle:
             cx, cy = raw.compute_bounds(config.dropped_layers()).center
             config.vehicle_proxy.pos_x, config.vehicle_proxy.pos_y = round(cx, 3), round(cy, 3)

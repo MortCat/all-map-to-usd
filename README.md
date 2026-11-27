@@ -23,6 +23,16 @@ Each completed stroke updates the collision preview and the geometry used for US
 
 Use the **Undo** and **Redo** icons next to **Width**, or press **Ctrl+Z** and **Ctrl+Shift+Z**. Press **R** to measure during editing and again to resume drawing. Edits live in the current app session. Export USD to keep the geometry after closing the app or loading another map.
 
+## Place 3D models
+
+Choose **Model** in the **Edit** tools to import equipment from **.usd**, **.usda**, **.usdc**, **.usdz**, **.step**, **.stp**, or **.stl** files. In the import dialog, keep **Whole model** or pick parts from the USD hierarchy or the STEP assembly tree. Check the units and up axis. STL files have no units and default to millimetres. STEP files are read in millimetres. Each model is converted to meters, Z up, and stands on the floor.
+
+STEP import uses OpenCASCADE, a large download. `start_app.cmd` installs it during setup. If that step fails, for example because no build exists for your Python version yet, setup notes it in **setup.log** and the app still runs without STEP. A pip install needs the extra: `python -m pip install "allmaptousd[step]"`. STEP parts keep their colours but not their textures.
+
+A USD model often keeps its textures, materials (`.mdl`), or parts in separate files. To import the whole model, click **Choose Folder** and select the model's folder, or choose a **.zip** of it. A **.usdz** already holds its files. If the folder has more than one model file, pick the right one in **Main file**. The dialog lists any file the model uses that was not uploaded. Materials that come with Isaac Sim, such as `OmniPBR.mdl`, need no file.
+
+Imported models appear as 3D pictures in the tray, in the colours and textures of their materials. Drag a picture onto the map to place the model. Right-drag a picture, or Shift-drag it on a trackpad, to turn it. Drag a placed model to move it. Right-click it to set its yaw or delete it, or press **Delete**. A placed model's top-view outline always counts in the AGV collision check.
+
 ## Supported maps
 
 | Source | Input | Options |

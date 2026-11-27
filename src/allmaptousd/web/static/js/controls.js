@@ -6,8 +6,11 @@ function canvasPointer(e) {
   return [e.clientX - rect.left, e.clientY - rect.top];
 }
 
+let rightDown = null;  // where the right button went down: a click without a drag opens the model menu
+
 function stopDrag() {
   if (dragMode === "ruler" && rulerP2) rulerAwaitingSecond = false;
+  modelMove = null;
   dragMode = null;
   canvas.classList.remove("dragging");
 }
@@ -30,10 +33,17 @@ canvas.addEventListener("mousedown", (e) => {
     return;
   }
 
-  if (editor.open && e.button === 0) {
+  if (editor.open && editor.tool === "model" && e.button === 0) {
+    if (startModelMove(wp)) {
+      dragMode = "model";
+      canvas.classList.add("dragging");
+      return;
+    }
+  } else if (editor.open && e.button === 0) {
     startEditStroke(wp);
     return;
   }
+  if (e.button === 2) rightDown = { x: e.clientX, y: e.clientY };
   if (e.button === 1 || (e.button === 2 && editor.open)) e.preventDefault();
 
   if (mapData && e.button === 0 && document.getElementById("layerAgv").checked) {
@@ -60,6 +70,8 @@ window.addEventListener("mousemove", (e) => {
     }
   } else if (dragMode === "edit") {
     moveEditStroke(wp);
+  } else if (dragMode === "model") {
+    moveModel(wp);
   } else if (dragMode === "agv") {
     agv.x = wp.x + agvDragOffset.x; agv.y = wp.y + agvDragOffset.y; render();
   } else if (dragMode === "pan") {
@@ -84,7 +96,13 @@ window.addEventListener("blur", () => {
   stopDrag();
 });
 canvas.addEventListener("contextmenu", (e) => {
-  if (editor.open) e.preventDefault();
+  if (!editor.open) return;
+  e.preventDefault();
+  const clicked = rightDown && Math.hypot(e.clientX - rightDown.x, e.clientY - rightDown.y) <= 4;
+  rightDown = null;
+  if (editor.tool !== "model" || !clicked) return;
+  const hit = placementAt(screenToWorld(...canvasPointer(e)));
+  if (hit) openModelMenu(hit, e.clientX, e.clientY);
 });
 
 canvas.addEventListener("wheel", (e) => {
@@ -111,6 +129,10 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.repeat && key === "r") return;
+  if ((key === "delete" || key === "backspace") && editor.open && editor.tool === "model" && selectedPlacement) {
+    deleteSelectedModel();
+    return;
+  }
   if (key === "escape" && editor.stroke) {
     editor.stroke = null;
     dragMode = null;

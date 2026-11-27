@@ -170,6 +170,16 @@ class VehicleProxyConfig(BaseModel):
     yaw_deg: float = 0.0
 
 
+class EquipmentPlacement(BaseModel):
+    """An imported 3D model (``ModelAsset``) standing on the map at (x, y), turned by yaw_deg."""
+
+    model_id: str = Field(pattern=r"^[0-9a-f]{12}$")
+    name: str = Field(default="Equipment", min_length=1, max_length=128)
+    x: float = Field(default=0.0, allow_inf_nan=False)
+    y: float = Field(default=0.0, allow_inf_nan=False)
+    yaw_deg: float = Field(default=0.0, ge=-360.0, le=360.0)
+
+
 class BuildConfig(BaseModel):
     """Parameters controlling obstacle reconstruction and USD extrusion."""
 
@@ -197,6 +207,7 @@ class BuildConfig(BaseModel):
     origin_y: float = 0.0
     origin_yaw_deg: float = Field(default=0.0, ge=-360.0, le=360.0)
     vehicle_proxy: VehicleProxyConfig = Field(default_factory=VehicleProxyConfig)
+    equipment: list[EquipmentPlacement] = Field(default_factory=list, max_length=500)
 
     def dropped_layers(self) -> set[str]:
         """CAD layers left out of the build: explicitly excluded or given a height <= 0."""

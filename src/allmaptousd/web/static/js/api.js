@@ -43,6 +43,8 @@ async function postJson(url, body, fallback) {
 
 function applyMapPayload(payload, shouldFit = true, newSource = null, { preserveVehicle = false } = {}) {
   mapData = payload;
+  if (payload.models) syncModelLibrary(payload.models);
+  if (newSource) setPlacements(payload.config?.equipment);
   if (newSource) resetEditor(newSource === "edit");
   document.getElementById("emptyOverlay").classList.add("hidden");
   const m = payload.metadata, b = payload.bounds;
@@ -118,7 +120,8 @@ function collectBuildConfig() {
       enabled: document.getElementById("includeAgv").checked,
       length: agv.length, width: agv.width, height: agv.height,
       pos_x: agv.x, pos_y: agv.y, yaw_deg: agv.yawDeg
-    }
+    },
+    equipment: collectPlacements(),
   };
 }
 

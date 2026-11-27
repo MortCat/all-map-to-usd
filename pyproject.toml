@@ -26,6 +26,7 @@ allmaptousd = "allmaptousd.cli:main"
 
 [project.optional-dependencies]
 desktop = ["pywebview>=5.1"]
+step = ["cadquery-ocp>=7.7,<8"]  # The STEP importer uses the OpenCASCADE 7 label sequence API.
 dev = ["pytest>=8.0", "ruff>=0.6", "httpx>=0.27"]
 
 [tool.setuptools.packages.find]

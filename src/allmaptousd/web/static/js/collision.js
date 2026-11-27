@@ -59,50 +59,60 @@ function polygonsOverlapAndDist(polyA, polyB) {
   return { hit: false, dist: minDist };
 }
 
-function getBoxCornersAndAabb(box) {
-  const [x0, y0, x1, y1] = box;
-  return { poly: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], x0, y0, x1, y1 };
+function polygonBounds(poly) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of poly) {
+    if (x < x0) x0 = x;
+    if (y < y0) y0 = y;
+    if (x > x1) x1 = x;
+    if (y > y1) y1 = y;
+  }
+  return { x0, y0, x1, y1 };
+}
+
+// Obstacle outlines with their bounding boxes, built once per map payload rather than on every mouse move.
+let obstacleCache = { source: null, items: [] };
+function obstacleShapes() {
+  if (obstacleCache.source !== mapData) {
+    const items = [];
+    for (const poly of (mapData.obstacle_polygons || [])) {
+      if (poly && poly.length >= 3) items.push({ poly, reason: "Obstacle", ...polygonBounds(poly) });
+    }
+    for (const [x0, y0, x1, y1] of (mapData.obstacle_boxes || [])) {
+      items.push({ poly: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], reason: "Wall", x0, y0, x1, y1 });
+    }
+    obstacleCache = { source: mapData, items };
+  }
+  return obstacleCache.items;
 }
 
 function evaluateCollision() {
   if (!mapData) return;
   const agvPoly = getAgvCorners();
-  let agvMinX = Infinity, agvMinY = Infinity, agvMaxX = -Infinity, agvMaxY = -Infinity;
-  for (const [x, y] of agvPoly) {
-    if (x < agvMinX) agvMinX = x;
-    if (y < agvMinY) agvMinY = y;
-    if (x > agvMaxX) agvMaxX = x;
-    if (y > agvMaxY) agvMaxY = y;
-  }
+  const agvBox = polygonBounds(agvPoly);
 
   let hit = false, minDist = Infinity, reason = "";
-  for (const poly of (mapData.obstacle_polygons || [])) {
-    if (!poly || poly.length < 3) continue;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const [x, y] of poly) {
-      if (x < x0) x0 = x;
-      if (y < y0) y0 = y;
-      if (x > x1) x1 = x;
-      if (y > y1) y1 = y;
-    }
-    const dx = Math.max(0, x0 - agvMaxX, agvMinX - x1);
-    const dy = Math.max(0, y0 - agvMaxY, agvMinY - y1);
-    if (Math.hypot(dx, dy) > minDist && minDist < Infinity) continue;
-    const res = polygonsOverlapAndDist(agvPoly, poly);
-    if (res.hit) { hit = true; minDist = 0; reason = "Obstacle"; break; }
+  for (const item of obstacleShapes()) {
+    const dx = Math.max(0, item.x0 - agvBox.x1, agvBox.x0 - item.x1);
+    const dy = Math.max(0, item.y0 - agvBox.y1, agvBox.y0 - item.y1);
+    if (Math.hypot(dx, dy) > minDist) continue;
+    const res = polygonsOverlapAndDist(agvPoly, item.poly);
+    if (res.hit) { hit = true; minDist = 0; reason = item.reason; break; }
     if (res.dist < minDist) minDist = res.dist;
   }
 
-  if (!hit) {
-    for (const box of (mapData.obstacle_boxes || [])) {
-      const { poly: boxPoly, x0, y0, x1, y1 } = getBoxCornersAndAabb(box);
-      const dx = Math.max(0, x0 - agvMaxX, agvMinX - x1);
-      const dy = Math.max(0, y0 - agvMaxY, agvMinY - y1);
-      if (Math.hypot(dx, dy) > minDist && minDist < Infinity) continue;
-      const res = polygonsOverlapAndDist(agvPoly, boxPoly);
-      if (res.hit) { hit = true; minDist = 0; reason = "Wall"; break; }
+  // Placed 3D models always count as obstacles.
+  for (const p of hit ? [] : placements) {
+    for (const poly of placementPolygons(p)) {
+      const box = polygonBounds(poly);
+      const dx = Math.max(0, box.x0 - agvBox.x1, agvBox.x0 - box.x1);
+      const dy = Math.max(0, box.y0 - agvBox.y1, agvBox.y0 - box.y1);
+      if (Math.hypot(dx, dy) > minDist) continue;
+      const res = polygonsOverlapAndDist(agvPoly, poly);
+      if (res.hit) { hit = true; minDist = 0; reason = `Model (${p.name})`; break; }
       if (res.dist < minDist) minDist = res.dist;
     }
+    if (hit) break;
   }
 
   const checkForbidden = document.getElementById("forbiddenCollision")?.checked ?? true;
@@ -116,21 +126,22 @@ function evaluateCollision() {
   }
 
   lastCollision = { hit, minDist, reason };
-  const banner = document.getElementById("collisionStatus");
-  const label = document.getElementById("collisionLabel");
-  const ct = document.getElementById("clearanceText");
+  let state, text, clearance;
   if (hit) {
-    banner.className = "status-banner hit";
-    label.textContent = `COLLISION · ${reason}`;
-    ct.textContent = "0.00 m";
+    [state, text, clearance] = ["hit", `COLLISION · ${reason}`, "0.00 m"];
   } else if (minDist < agv.margin) {
-    banner.className = "status-banner warn";
-    label.textContent = `TOO CLOSE · < ${agv.margin.toFixed(2)} m`;
-    ct.textContent = `Min ${minDist.toFixed(2)} m`;
+    [state, text, clearance] = ["warn", `TOO CLOSE · < ${agv.margin.toFixed(2)} m`, `Min ${minDist.toFixed(2)} m`];
   } else {
-    banner.className = "status-banner ok";
-    label.textContent = "CLEAR";
-    ct.textContent = Number.isFinite(minDist) ? `Min ${minDist.toFixed(2)} m` : "--";
+    [state, text, clearance] = ["ok", "CLEAR", Number.isFinite(minDist) ? `Min ${minDist.toFixed(2)} m` : "--"];
   }
+  document.getElementById("collisionStatus").className = `status-banner ${state}`;
+  document.getElementById("collisionLabel").textContent = text;
+  document.getElementById("clearanceText").textContent = clearance;
+  // Mirror the result in the always-visible bottom HUD (the banner lives in a collapsible panel).
+  const hud = document.getElementById("hudCollision");
+  hud.hidden = false;
+  hud.className = `hud-status ${state}`;
+  document.getElementById("hudCollisionText").textContent =
+    state === "hit" ? text : `${text.split(" · ")[0]} · ${clearance.replace("Min ", "")}`;
   document.getElementById("agvCoord").textContent = `(${agv.x.toFixed(2)}, ${agv.y.toFixed(2)}, ${Math.round(agv.yawDeg)}°)`;
 }

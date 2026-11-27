@@ -409,18 +409,22 @@
         Edit
       </button>
       <div class="sep"></div>
-      <label class="layer-pill"><input id="layerBoxes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#94a3b8"></span>Obstacles</label>
-      <label class="layer-pill"><input id="layerPoints" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#38bdf8"></span>Raw Points</label>
-      <label class="layer-pill"><input id="layerForbidden" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#ef4444"></span>Forbidden</label>
-      <label class="layer-pill"><input id="layerRoutes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#22d3ee"></span>Routes</label>
-      <label class="layer-pill"><input id="layerGrid" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#64748b"></span>Grid</label>
-      <label class="layer-pill"><input id="layerAgv" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#22c55e"></span>AGV Box</label>
+      <label class="layer-pill" title="Obstacles"><input id="layerBoxes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#94a3b8"></span><span class="pill-label">Obstacles</span></label>
+      <label class="layer-pill" title="Raw Points"><input id="layerPoints" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#38bdf8"></span><span class="pill-label">Raw Points</span></label>
+      <label class="layer-pill" title="Forbidden"><input id="layerForbidden" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#ef4444"></span><span class="pill-label">Forbidden</span></label>
+      <label class="layer-pill" title="Routes"><input id="layerRoutes" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#22d3ee"></span><span class="pill-label">Routes</span></label>
+      <label class="layer-pill" title="3D Models"><input id="layerModels" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#a78bfa"></span><span class="pill-label">Models</span></label>
+      <label class="layer-pill" title="Grid"><input id="layerGrid" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#64748b"></span><span class="pill-label">Grid</span></label>
+      <label class="layer-pill" title="AGV Box"><input id="layerAgv" type="checkbox" checked onchange="render()" /><span class="dot" style="background:#22c55e"></span><span class="pill-label">AGV Box</span></label>
       <div class="spacer"></div>
       <div class="meta-bar" id="metaSummary">No map loaded</div>
     </div>
 
       <div id="editTools" class="edit-tools" role="group" aria-label="Map drawing tools" hidden>
         <div class="edit-tools-group">
+          <button class="btn" type="button" data-edit-tool="model" aria-pressed="false" title="Insert 3D models (USD / STEP / STL) and place them on the map">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>Model
+          </button>
           <button class="btn" type="button" data-edit-tool="brush" aria-pressed="true" title="Click to add a point or drag to draw">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 15 10-12 2 2-8 13M9 15c-4-1-4 4-6 5 4 2 9 1 10-2Z"/></svg>Brush
           </button>
@@ -466,6 +470,33 @@
     <div class="canvas-wrap">
       <canvas id="canvas"></canvas>
 
+      <!-- 3D model tray (Edit > Model) and the menu of a placed model -->
+      <aside id="modelTray" class="model-tray" aria-label="3D models" hidden>
+        <div class="model-tray-head">
+          <span>3D Models</span>
+          <button class="btn secondary" type="button" onclick="openModelDialog()">+ Import</button>
+        </div>
+        <p class="model-tray-hint">Drag a picture onto the map to place it. Right-drag a picture to turn it. Right-click a placed model to turn or delete it.</p>
+        <p id="modelTrayEmpty" class="model-tray-hint">No models yet. Import a USD, STEP or STL file.</p>
+        <div id="modelTrayList" class="model-tray-list"></div>
+      </aside>
+      <div id="modelMenu" class="model-menu" role="dialog" aria-labelledby="modelMenuTitle" hidden>
+        <strong id="modelMenuTitle" class="model-menu-title"></strong>
+        <div class="field">
+          <label class="field-label" for="modelMenuYaw">Yaw (°)</label>
+          <div class="stepper">
+            <button type="button" aria-label="Turn 15° clockwise" onclick="turnSelectedModel(-15)">−</button>
+            <input id="modelMenuYaw" type="number" min="-360" max="360" step="1" value="0" />
+            <button type="button" aria-label="Turn 15° counter-clockwise" onclick="turnSelectedModel(15)">+</button>
+          </div>
+        </div>
+        <div class="grid-2">
+          <button class="btn" type="button" onclick="turnSelectedModel(-90)">−90°</button>
+          <button class="btn" type="button" onclick="turnSelectedModel(90)">+90°</button>
+        </div>
+        <button class="btn danger" type="button" onclick="deleteSelectedModel()">Delete</button>
+      </div>
+
       <!-- Empty State Card -->
       <div class="empty-overlay" id="emptyOverlay">
         <div class="empty-card">
@@ -487,6 +518,7 @@
         <span>Cursor <strong id="cursorCoord">(0.00, 0.00) m</strong></span>
         <span class="hud-divider" aria-hidden="true">|</span>
         <span>AGV <strong id="agvCoord">(0.00, 0.00, 0°)</strong></span>
+        <span id="hudCollision" class="hud-status" hidden><span class="status-dot"></span><strong id="hudCollisionText">--</strong></span>
         <span class="hud-divider hud-shortcuts-divider" aria-hidden="true">|</span>
         <span class="hud-shortcuts"><kbd>Q</kbd><kbd>E</kbd> Rotate · <kbd>R</kbd> Ruler · <kbd>F</kbd> Fit · <kbd>B</kbd> Sidebar</span>
       </div>
@@ -550,9 +582,72 @@
 </dialog>
 
 <!-- Load order matters: later files use functions and state from earlier ones. -->
+<dialog id="modelDialog" class="map-dialog model-dialog" aria-labelledby="modelDialogTitle">
+  <form id="modelForm">
+    <h2 id="modelDialogTitle">Insert 3D Model</h2>
+    <button type="button" class="dropzone model-file" onclick="document.getElementById('modelFile').click()">
+      <strong id="modelFileLabel">Choose a USD, STEP or STL file</strong>
+      <small><code>.usd</code> <code>.usda</code> <code>.usdc</code> <code>.usdz</code> <code>.step</code> <code>.stp</code> <code>.stl</code> <code>.zip</code></small>
+    </button>
+    <div class="model-folder-row">
+      <span>Textures or materials in separate files? Choose the model's folder, or a <code>.zip</code> of it.</span>
+      <button type="button" class="btn secondary" onclick="document.getElementById('modelFolder').click()">Choose Folder</button>
+    </div>
+    <input id="modelFile" type="file" accept=".usd,.usda,.usdc,.usdz,.step,.stp,.stl,.zip" hidden />
+    <input id="modelFolder" type="file" webkitdirectory hidden />
+    <p id="modelMissing" class="model-missing" role="status" hidden></p>
+    <div id="modelPick" class="model-pick" hidden>
+      <div id="modelMainField" class="field" hidden>
+        <label class="field-label" for="modelMain">Main file</label>
+        <select id="modelMain"></select>
+      </div>
+      <label class="switch-row" id="modelWholeRow">
+        <span>Whole model</span>
+        <span class="switch"><input id="modelWhole" type="checkbox" checked /><span class="slider"></span></span>
+      </label>
+      <div id="modelTree" class="model-tree"></div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="field-label" for="modelUnit">Units</label>
+          <select id="modelUnit">
+            <option id="modelUnitAuto" value="auto">Auto</option>
+            <option value="m">m</option><option value="cm">cm</option><option value="mm">mm</option><option value="in">inch</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="modelUp">Up axis</label>
+          <select id="modelUp">
+            <option id="modelUpAuto" value="auto">Auto</option><option value="z">Z up</option><option value="y">Y up</option>
+          </select>
+        </div>
+      </div>
+      <p id="modelUnitNote" class="map-dialog-message"></p>
+    </div>
+    <p id="modelError" class="map-dialog-error" role="alert" hidden></p>
+    <div class="map-dialog-actions">
+      <button class="btn" type="submit" value="cancel" formnovalidate>Cancel</button>
+      <button id="modelImportBtn" class="btn primary" type="submit" value="import" disabled>Import</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="replaceMapDialog" class="map-dialog" aria-labelledby="replaceMapTitle" aria-describedby="replaceMapMessage">
+  <form method="dialog">
+    <h2 id="replaceMapTitle">Replace current map?</h2>
+    <p id="replaceMapMessage" class="map-dialog-message">Loading a different map will discard the current map’s edits.</p>
+    <div class="map-dialog-actions">
+      <button class="btn" type="submit" value="cancel" autofocus>Cancel</button>
+      <button class="btn secondary" type="submit" value="replace">Replace Map</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Load order matters: later files use functions and state from earlier ones. -->
 <script defer src="/static/js/core.js"></script>
 <script defer src="/static/js/collision.js"></script>
+<script defer src="/static/js/viewer3d.js"></script>
 <script defer src="/static/js/editor.js"></script>
+<script defer src="/static/js/models.js"></script>
 <script defer src="/static/js/render.js"></script>
 <script defer src="/static/js/controls.js"></script>
 <script defer src="/static/js/api.js"></script>

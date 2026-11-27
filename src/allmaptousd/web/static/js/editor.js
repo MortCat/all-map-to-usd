@@ -23,8 +23,11 @@ function updateEditorControls() {
   editButton.classList.toggle("active", editor.open);
   editButton.setAttribute("aria-expanded", String(editor.open));
   editTools.hidden = !editor.open;
-  canvas.classList.toggle("edit-mode", editor.open && !rulerActive);
-  canvas.title = editor.open ? "Middle-drag or right-drag to pan" : "";
+  const modelTool = editor.tool === "model";
+  canvas.classList.toggle("edit-mode", editor.open && !rulerActive && !modelTool);
+  canvas.classList.toggle("model-mode", editor.open && !rulerActive && modelTool);
+  canvas.title = !editor.open ? ""
+    : modelTool ? "Drag a model to move it · right-click it to turn or delete it" : "Middle-drag or right-drag to pan";
   for (const button of editTools.querySelectorAll("[data-edit-tool]")) {
     const selected = button.dataset.editTool === editor.tool;
     button.classList.toggle("active", selected);
@@ -37,7 +40,7 @@ function updateEditorControls() {
     ? "Drag a box to erase everything inside it · click again for the brush eraser"
     : "Drag to erase · click again to erase with a box";
   document.getElementById("editRectangleField").hidden = !rectangle;
-  document.getElementById("editWidthField").hidden = (rectangle && editRectangleStyle.value === "filled")
+  document.getElementById("editWidthField").hidden = modelTool || (rectangle && editRectangleStyle.value === "filled")
     || (editor.tool === "eraser" && editor.eraserBox);
   const busy = mapRequestActive || !!editor.saveTask;
   document.getElementById("editUndo").disabled = busy || !(mapData?.can_undo || editor.pending.length);
@@ -54,6 +57,7 @@ function updateEditorControls() {
     rulerActive ? "Press R to resume drawing" : "",
     editor.saveError,
   ].filter(Boolean).join(" · ");
+  updateModelTray();
 }
 
 function toggleEditor(force) {
@@ -110,8 +114,9 @@ editTools.addEventListener("click", (event) => {
   if (!button || mapRequestActive) return;
   if (button.dataset.editTool === "eraser" && editor.tool === "eraser") editor.eraserBox = !editor.eraserBox;
   editor.tool = button.dataset.editTool;
-  editWidth.value = editor.widths[editor.tool];
+  if (editor.tool !== "model") editWidth.value = editor.widths[editor.tool];
   updateEditorControls();
+  if (editor.tool === "model" && !modelLibrary.size) openModelDialog();
 });
 function saveEditWidth() {
   const fallback = editor.widths[editor.tool];

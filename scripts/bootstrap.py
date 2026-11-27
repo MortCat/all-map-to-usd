@@ -80,8 +80,9 @@ def stop_running() -> None:
 # (title, weight in the overall progress bar)
 STEPS = [
     ("Creating the Python environment (.venv)", 10),
-    ("Updating pip", 10),
-    ("Downloading and installing packages", 70),
+    ("Updating pip", 5),
+    ("Downloading and installing packages", 50),
+    ("Installing STEP model import (OpenCASCADE)", 25),
     ("Checking the installation", 10),
 ]
 EXPECTED_PACKAGES = 30  # rough count of "Collecting ..." lines, only used for the progress bar
@@ -128,6 +129,15 @@ def run_setup(
         on_step(2)
         run([str(VENV_PY), "-m", "pip", "install", "-e", ".[desktop]"], "Installing packages", count_packages=True)
         on_step(3)
+        try:  # optional: a large download, and may have no wheel for a brand-new Python; the app runs without it
+            run([str(VENV_PY), "-m", "pip", "install", "-e", ".[step]"], "Installing STEP support", count_packages=True)
+        except SetupError:
+            if cancelled.is_set():
+                raise
+            note = "STEP support could not be installed; the app works without it (see setup.log)."
+            log.write(f"\n{note}\n")
+            on_line(note)
+        on_step(4)
         run([str(VENV_PY), "-c", "import allmaptousd.web.server, pxr, cv2, webview; print('All modules import.')"],
             "Checking the installation")
         STAMP.write_text(requirements_hash(), encoding="utf-8")

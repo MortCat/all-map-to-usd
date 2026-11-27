@@ -50,8 +50,8 @@ function render() {
       ctx.fill();
       ctx.stroke();
     }
-    for (const box of (mapData.obstacle_boxes || [])) {
-      const { poly } = getBoxCornersAndAabb(box);
+    for (const [x0, y0, x1, y1] of (mapData.obstacle_boxes || [])) {
+      const poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
       ctx.beginPath();
       poly.forEach(([wx, wy], idx) => {
         const s = worldToScreen(wx, wy);
@@ -120,6 +120,8 @@ function render() {
       if (cam.scale > 25) { ctx.fillStyle = "#a5f3fc"; ctx.fillText(st.name, s.x + r + 3, s.y - r); }
     }
   }
+
+  drawPlacements();
 
   if (document.getElementById("layerAgv").checked) {
     evaluateCollision();
