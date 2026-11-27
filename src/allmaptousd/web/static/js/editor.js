@@ -7,6 +7,7 @@ const editor = {
   saveError: "",
   stroke: null,
   widths: {},
+  eraserBox: false,  // the Eraser button toggles between a brush eraser and a box eraser
 };
 const editTools = document.getElementById("editTools");
 const editWidth = document.getElementById("editWidth");
@@ -30,8 +31,14 @@ function updateEditorControls() {
     button.setAttribute("aria-pressed", String(selected));
   }
   const rectangle = editor.tool === "rectangle";
+  const eraserButton = editTools.querySelector('[data-edit-tool="eraser"]');
+  eraserButton.querySelector(".tool-label").textContent = editor.eraserBox ? "Box Eraser" : "Eraser";
+  eraserButton.title = editor.eraserBox
+    ? "Drag a box to erase everything inside it · click again for the brush eraser"
+    : "Drag to erase · click again to erase with a box";
   document.getElementById("editRectangleField").hidden = !rectangle;
-  document.getElementById("editWidthField").hidden = rectangle && editRectangleStyle.value === "filled";
+  document.getElementById("editWidthField").hidden = (rectangle && editRectangleStyle.value === "filled")
+    || (editor.tool === "eraser" && editor.eraserBox);
   const busy = mapRequestActive || !!editor.saveTask;
   document.getElementById("editUndo").disabled = busy || !(mapData?.can_undo || editor.pending.length);
   document.getElementById("editRedo").disabled = busy || !!editor.pending.length || !mapData?.can_redo;
@@ -60,6 +67,7 @@ function toggleEditor(force) {
 function resetEditor(open = false) {
   editor.open = open;
   editor.tool = "brush";
+  editor.eraserBox = false;
   editor.pending = [];
   editor.saveError = "";
   editor.stroke = null;
@@ -100,6 +108,7 @@ replaceMapDialog.addEventListener("cancel", event => {
 editTools.addEventListener("click", (event) => {
   const button = event.target.closest("[data-edit-tool]");
   if (!button || mapRequestActive) return;
+  if (button.dataset.editTool === "eraser" && editor.tool === "eraser") editor.eraserBox = !editor.eraserBox;
   editor.tool = button.dataset.editTool;
   editWidth.value = editor.widths[editor.tool];
   updateEditorControls();
@@ -128,11 +137,12 @@ function startEditStroke(world) {
   if (point[0] !== world.x || point[1] !== world.y) return;
   saveEditWidth();
   const tool = editor.tool;
+  const eraserBox = tool === "eraser" && editor.eraserBox;
   editor.stroke = {
     tool,
     width: editor.widths[tool],
-    filled: tool === "rectangle" && editRectangleStyle.value === "filled",
-    points: tool === "brush" || tool === "eraser" ? [point] : [point, point],
+    filled: eraserBox || (tool === "rectangle" && editRectangleStyle.value === "filled"),
+    points: tool === "brush" || (tool === "eraser" && !eraserBox) ? [point] : [point, point],
   };
   dragMode = "edit";
   render();
@@ -142,7 +152,7 @@ function moveEditStroke(world) {
   const stroke = editor.stroke;
   if (!stroke) return;
   const point = editPoint(world);
-  if (stroke.tool === "line" || stroke.tool === "rectangle") {
+  if (isTwoPointStroke(stroke)) {
     stroke.points[1] = point;
   } else {
     const previous = stroke.points.at(-1);
@@ -154,6 +164,14 @@ function moveEditStroke(world) {
     }
   }
   render();
+}
+
+function isBoxStroke(stroke) {
+  return stroke.tool === "rectangle" || (stroke.tool === "eraser" && stroke.filled);
+}
+
+function isTwoPointStroke(stroke) {
+  return stroke.tool === "line" || isBoxStroke(stroke);
 }
 
 function finishEditStroke() {
@@ -243,7 +261,7 @@ function drawMapEdits() {
   if (editor.stroke) drawEditStroke(editor.stroke);
   ctx.restore();
   const stroke = editor.stroke;
-  if (stroke?.tool === "line" || stroke?.tool === "rectangle") {
+  if (stroke && isTwoPointStroke(stroke)) {
     const [[x1, y1], [x2, y2]] = stroke.points;
     const dx = Math.abs(x2 - x1), dy = Math.abs(y2 - y1);
     const label = stroke.tool === "line"
@@ -273,11 +291,18 @@ function drawEditStroke(stroke) {
   ctx.lineWidth = width;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  if (stroke.tool === "rectangle" && (start.x !== end.x || start.y !== end.y)) {
+  if (isBoxStroke(stroke) && (start.x !== end.x || start.y !== end.y)) {
     const w = Math.max(mapData.edit_resolution * cam.scale, Math.abs(end.x - start.x));
     const h = Math.max(mapData.edit_resolution * cam.scale, Math.abs(end.y - start.y));
     const x = Math.min(start.x, end.x), y = Math.min(start.y, end.y);
-    if (stroke.filled) ctx.fillRect(x, y, w, h);
+    if (erasing) {  // box erase: a light fill with a dashed outline, so the map shows through
+      ctx.fillStyle = "rgba(251, 113, 133, 0.25)";
+      ctx.fillRect(x, y, w, h);
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+    } else if (stroke.filled) ctx.fillRect(x, y, w, h);
     else ctx.strokeRect(x, y, w, h);
   } else if (points.length === 1 || (points.length === 2 && start.x === end.x && start.y === end.y)) {
     ctx.beginPath();

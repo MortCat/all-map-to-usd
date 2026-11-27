@@ -567,3 +567,38 @@ def test_ros_negate_and_origin_yaw(tmp_path: Path) -> None:
     # Cell centre (0.25, 0.95) in the map frame, rotated by origin yaw 90deg about the origin
     rotated = parse(1, float(np.pi / 2))
     assert rotated.points[0] == pytest.approx([1.0 - 0.95, 2.0 + 0.25])
+
+
+def test_triangulation_covers_self_touching_contours() -> None:
+    """A cell contour that touches itself along a zero-width bridge must not leave holes in the mesh."""
+    from allmaptousd.geometry.reconstruct import _polygon_signed_area, triangulate_polygon
+
+    pinched = np.array([
+        (31, 10), (32, 11), (33, 10), (35, 10), (35, 11), (34, 12), (33, 12), (32, 13), (33, 14), (34, 14),
+        (35, 15), (35, 16), (34, 16), (33, 17), (35, 19), (35, 20), (30, 20), (30, 16), (31, 15), (32, 15),
+        (33, 14), (32, 13), (31, 13), (31, 12), (30, 11), (30, 10),
+    ], dtype=float)
+    pts, tris = triangulate_polygon(pinched)
+    covered = sum(abs(_polygon_signed_area([pts[a], pts[b], pts[c]])) for a, b, c in tris)
+    assert covered == pytest.approx(abs(_polygon_signed_area(pts)))
+
+
+@pytest.mark.parametrize(
+    ("area", "forbidden"),
+    [
+        ({"className": "ForbiddenArea"}, True),
+        ({"className": "NoGoArea"}, True),
+        ({"instanceName": "virtual_wall_3"}, True),
+        ({"className": "BanArea"}, True),
+        ({"instanceName": "禁行区"}, True),
+        ({"className": "UnrestrictedArea"}, False),
+        ({"instanceName": "Banner_Display"}, False),
+        ({"className": "SpeedArea"}, False),
+        ({"className": "AdvancedArea", "property": [{"key": "isForbidden", "boolValue": False}]}, False),
+        ({"className": "AdvancedArea", "property": [{"key": "isForbidden", "boolValue": True}]}, True),
+    ],
+)
+def test_seer_forbidden_area_keywords(area: dict, forbidden: bool) -> None:
+    from allmaptousd.parsers.seer_smap import _is_forbidden_area
+
+    assert _is_forbidden_area(area) is forbidden

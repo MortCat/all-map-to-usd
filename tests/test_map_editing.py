@@ -110,6 +110,21 @@ class MapEditingTests(unittest.TestCase):
             self.assertEqual(built.layer_names, ["Walls"])
         self.assertEqual(len(raw.points), len(xs))
 
+    def test_box_eraser_clears_everything_inside_the_box(self) -> None:
+        xs = np.arange(0.025, 5, 0.05)
+        raw = CanonicalMap(points=as_points([(x, 1.025) for x in xs]))
+        session = MapSession()
+        session.use(raw, config=BuildConfig())
+        block = MapStroke(tool="rectangle", width=0.05, points=[(2.0, 2.0), (4.0, 3.0)], filled=True)
+        box = MapStroke(tool="eraser", width=0.05, points=[(1.5, 0.5), (3.0, 3.5)], filled=True)
+        built = session.apply_edits([block, box], session.config)
+        for x, y in ((1, 1.025), (4.5, 1.025), (3.5, 2.5)):  # outside the box
+            self.assertTrue(covers(built.obstacle_boxes, x, y), (x, y))
+        for x, y in ((2, 1.025), (2.9, 1.025), (2.5, 2.5)):  # inside: imported points and the drawn block
+            self.assertFalse(covers(built.obstacle_boxes, x, y), (x, y))
+        with self.assertRaises(ValueError):
+            MapStroke(tool="eraser", width=0.05, points=[(1, 1)], filled=True)
+
     def test_drawn_loop_fills_up_to_limit_without_resealing_erased_gaps(self) -> None:
         session = MapSession()
         config = BuildConfig(grid_resolution=0.1, solid_fill_max_area_m2=8.41)

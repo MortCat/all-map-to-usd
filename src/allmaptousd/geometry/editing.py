@@ -18,15 +18,21 @@ Coordinate = Annotated[float, Field(ge=-1e7, le=1e7, allow_inf_nan=False)]
 
 
 class MapStroke(BaseModel):
+    """``filled`` makes a rectangle solid; on the eraser it means a box erase between two corners."""
+
     tool: Literal["brush", "line", "rectangle", "eraser"]
     points: list[tuple[Coordinate, Coordinate]] = Field(min_length=1, max_length=8192)
     width: float = Field(ge=0.01, le=5.0)
     filled: bool = False
 
+    @property
+    def box(self) -> bool:
+        return self.tool == "rectangle" or (self.tool == "eraser" and self.filled)
+
     @model_validator(mode="after")
     def check_shape(self) -> MapStroke:
-        if self.tool in ("line", "rectangle") and len(self.points) != 2:
-            raise ValueError("A line or rectangle needs two points.")
+        if (self.tool == "line" or self.box) and len(self.points) != 2:
+            raise ValueError("A line, rectangle, or box erase needs two points.")
         return self
 
 
@@ -64,7 +70,7 @@ def rasterize_edits(strokes: list[MapStroke], res: float, bounds: Bounds2D | Non
         cells = np.floor(np.asarray(stroke.points) / res + 1e-7).astype(np.int64)
         if bounds:
             cells = np.clip(cells, 0, limit)
-        filled = stroke.tool == "rectangle" and stroke.filled
+        filled = stroke.box and stroke.filled
         thickness = 1 if filled else max(1, math.floor(stroke.width / res + 0.5))
         lo = cells.min(axis=0) - (thickness - 1) // 2
         hi = cells.max(axis=0) + thickness // 2
@@ -83,7 +89,7 @@ def rasterize_edits(strokes: list[MapStroke], res: float, bounds: Bounds2D | Non
         path = (cells - lo).astype(np.int32)
         w, h = (hi - lo + 1).tolist()
         mask = np.zeros((h, w), dtype=np.uint8)
-        if stroke.tool == "rectangle":
+        if stroke.box:
             cv2.rectangle(mask, tuple(path.min(axis=0)), tuple(path.max(axis=0)), 1, -1 if filled else 1)
         elif len(path) == 1:
             x, y = path[0]

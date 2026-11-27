@@ -530,21 +530,82 @@ def reconstruct_obstacles(
 # Ear-Clipping Triangulation for Extruded USD Meshes
 # ---------------------------------------------------------------------------
 
+def _cross(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
 def _point_in_triangle(
     p: tuple[float, float],
     a: tuple[float, float],
     b: tuple[float, float],
     c: tuple[float, float],
 ) -> bool:
-    def sign(p1: tuple[float, float], p2: tuple[float, float], p3: tuple[float, float]) -> float:
-        return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
+    """True when ``p`` lies inside or on the edges of the counter-clockwise triangle ``abc``."""
+    return _cross(a, b, p) >= -1e-9 and _cross(b, c, p) >= -1e-9 and _cross(c, a, p) >= -1e-9
 
-    d1 = sign(p, a, b)
-    d2 = sign(p, b, c)
-    d3 = sign(p, c, a)
-    has_neg = (d1 < -1e-9) or (d2 < -1e-9) or (d3 < -1e-9)
-    has_pos = (d1 > 1e-9) or (d2 > 1e-9) or (d3 > 1e-9)
-    return not (has_neg and has_pos)
+
+def _split_touching_loops(pts: list[tuple[float, float]]) -> list[list[int]]:
+    """Split a contour that touches itself (a repeated vertex) into simple loops of vertex indices.
+
+    Cell contours pinch where two parts meet along a zero-width bridge; ear clipping cannot cross
+    that bridge, so each side is triangulated on its own.
+    """
+    def key(i: int) -> tuple[float, float]:
+        return round(pts[i][0], 9), round(pts[i][1], 9)
+
+    loops: list[list[int]] = []
+    stack: list[int] = []
+    seen: dict[tuple[float, float], int] = {}
+    for i in range(len(pts)):
+        at = seen.get(key(i))
+        if at is None:
+            seen[key(i)] = len(stack)
+            stack.append(i)
+            continue
+        loops.append(stack[at:])
+        for q in stack[at + 1 :]:
+            del seen[key(q)]
+        del stack[at + 1 :]
+    loops.append(stack)
+    return loops
+
+
+def _clip_ears(pts: list[tuple[float, float]], loop: list[int]) -> list[tuple[int, int, int]]:
+    """Ear-clip one simple counter-clockwise loop. Only reflex vertices can sit inside an ear, so only
+    they are tested. If a full lap finds no clean ear (self-intersecting input), a convex vertex is
+    clipped anyway: overlapping triangles are harmless, a missing one leaves a hole in the collider."""
+    idx = list(loop)
+
+    def convex(k: int) -> bool:
+        return _cross(pts[idx[k - 1]], pts[idx[k]], pts[idx[(k + 1) % len(idx)]]) > 1e-12
+
+    reflex = {idx[k] for k in range(len(idx)) if not convex(k)}
+    triangles: list[tuple[int, int, int]] = []
+    k = stall = 0
+    while len(idx) > 3:
+        m = len(idx)
+        k %= m
+        i, j, n = idx[k - 1], idx[k], idx[(k + 1) % m]
+        a, b, c = pts[i], pts[j], pts[n]
+        clean = j not in reflex and not any(
+            q not in (i, j, n) and pts[q] not in (a, b, c) and _point_in_triangle(pts[q], a, b, c)
+            for q in reflex
+        )
+        if clean or (stall >= m and j not in reflex):
+            triangles.append((i, j, n))
+            idx.pop(k)
+            stall = 0
+            for pos in ((k - 1) % (m - 1), k % (m - 1)):  # the two neighbours may have turned convex
+                (reflex.discard if convex(pos) else reflex.add)(idx[pos])
+            k -= 1
+        else:
+            k += 1
+            stall += 1
+            if stall >= 2 * m:  # only reflex or collinear vertices left: nothing with area remains
+                break
+    if len(idx) == 3 and _cross(*(pts[q] for q in idx)) > 1e-12:
+        triangles.append((idx[0], idx[1], idx[2]))
+    return triangles
 
 
 def triangulate_polygon(
@@ -556,43 +617,12 @@ def triangulate_polygon(
         pts.pop()
     if len(pts) < 3:
         return pts, []
-
     if _polygon_signed_area(pts) < 0:
         pts.reverse()
 
-    indices = list(range(len(pts)))
     triangles: list[tuple[int, int, int]] = []
-    guard = 0
-    max_iters = len(pts) * len(pts) + 10
-
-    while len(indices) > 3 and guard < max_iters:
-        guard += 1
-        ear_found = False
-        m = len(indices)
-        for i in range(m):
-            i_prev = indices[(i - 1) % m]
-            i_curr = indices[i]
-            i_next = indices[(i + 1) % m]
-            a, b, c = pts[i_prev], pts[i_curr], pts[i_next]
-            cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-            if cross <= 1e-9:
-                continue
-            contains_other = False
-            for j in indices:
-                if j in (i_prev, i_curr, i_next):
-                    continue
-                if _point_in_triangle(pts[j], a, b, c):
-                    contains_other = True
-                    break
-            if not contains_other:
-                triangles.append((i_prev, i_curr, i_next))
-                indices.pop(i)
-                ear_found = True
-                break
-        if not ear_found:
-            break
-
-    if len(indices) == 3:
-        triangles.append((indices[0], indices[1], indices[2]))
-
+    for loop in _split_touching_loops(pts):
+        # A clockwise sub-loop is a hole touching the outline at one vertex: leave it open.
+        if len(loop) >= 3 and _polygon_signed_area([pts[i] for i in loop]) > 1e-12:
+            triangles += _clip_ears(pts, loop)
     return pts, triangles

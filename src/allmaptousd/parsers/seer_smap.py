@@ -10,6 +10,7 @@ Supports SEER JSON-serialized .smap files (conforming to message_map.proto schem
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,38 +19,34 @@ import numpy as np
 from allmaptousd.models import CanonicalMap, MapMetadata, RoutePath, Station, Zone, as_points
 from allmaptousd.parsers.base import MapInputBundle
 
-_FORBIDDEN_KEYWORDS = (
-    "forbidden",
-    "forbid",
-    "nogo",
-    "no_go",
-    "restrict",
-    "block",
-    "obstacle",
-    "virtualwall",
-    "virtual_wall",
-    "danger",
-    "ban",
-    "禁",
-)
+# Matched against whole words (CamelCase, snake_case and spaces split; "NoGo" also joins to "nogo"),
+# so "UnrestrictedArea", "Banner" or "SpeedArea" are not mistaken for no-go zones.
+_FORBIDDEN_WORD_PREFIXES = ("forbid", "nogo", "restrict", "block", "obstacle", "virtualwall", "danger")
+_FORBIDDEN_WORDS = frozenset({"ban", "banned"})
+_FORBIDDEN_FLAG_KEYS = frozenset({"forbidden", "isForbidden", "forbid"})
+_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def _words(text: str) -> list[str]:
+    words = [w.lower() for w in _WORD.findall(text)]
+    return words + [a + b for a, b in zip(words, words[1:])]
 
 
 def _is_forbidden_area(area: dict[str, Any]) -> bool:
     """Heuristic check for SEER advancedAreaList entries that represent forbidden zones."""
-    candidates = [
-        str(area.get("className", "")),
-        str(area.get("instanceName", "")),
-        str(area.get("areaType", "")),
-    ]
+    texts = [str(area.get(key, "")) for key in ("className", "instanceName", "areaType")]
     for prop in area.get("property", []) or []:
-        if isinstance(prop, dict):
-            candidates.append(str(prop.get("key", "")))
-            candidates.append(str(prop.get("stringValue", "")))
-            if prop.get("key") in ("forbidden", "isForbidden", "forbid") and prop.get("boolValue"):
-                return True
-    blob = " ".join(candidates).lower()
-    # Explicitly exclude purely non-blocking areas if no forbidden keyword matches
-    return any(kw in blob for kw in _FORBIDDEN_KEYWORDS)
+        if not isinstance(prop, dict):
+            continue
+        if prop.get("key") in _FORBIDDEN_FLAG_KEYS:  # an explicit flag wins either way
+            if "boolValue" in prop:
+                return bool(prop["boolValue"])
+            continue
+        texts += [str(prop.get("key", "")), str(prop.get("stringValue", ""))]
+    if any("禁" in text for text in texts):
+        return True
+    words = [w for text in texts for w in _words(text)]
+    return any(w in _FORBIDDEN_WORDS or w.startswith(_FORBIDDEN_WORD_PREFIXES) for w in words)
 
 
 def _xy(pos: Any) -> tuple[float, float] | None:
