@@ -12,12 +12,13 @@ Adding a vendor format means adding a parser; adding a front end means calling M
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
 from allmaptousd.exporters.usd_exporter import export_to_usd, export_to_usd_bytes, placed_model_files
-from allmaptousd.geometry import reconstruct_obstacles
+from allmaptousd.geometry import nearest_free_point, reconstruct_obstacles
 from allmaptousd.geometry.editing import EditRaster, MapStroke, rasterize_edits
 from allmaptousd.model_assets import ModelAsset
 from allmaptousd.models import BuildConfig, CanonicalMap
@@ -68,14 +69,21 @@ class MapSession:
         self, raw: CanonicalMap, center_vehicle: bool = True, *, config: BuildConfig | None = None,
         keep_equipment: bool = False,
     ) -> CanonicalMap:
-        """Adopt an already-parsed map and clear placements unless the map has saved equipment."""
+        """Adopt an already-parsed map; by default the AGV proxy starts at the clear spot nearest the
+        map centre (any heading fits there, with a 0.1 m margin). Placed 3D models belong to the
+        previous map and are cleared, unless a saved map brings its own (``keep_equipment``)."""
         config = (config or self.config).model_copy(deep=True)
         if not keep_equipment:
             config.equipment = []
-        if center_vehicle:
-            cx, cy = raw.compute_bounds(config.dropped_layers()).center
-            config.vehicle_proxy.pos_x, config.vehicle_proxy.pos_y = round(cx, 3), round(cy, 3)
         built = reconstruct_obstacles(raw.copy(), config)
+        if center_vehicle:
+            vp, dropped = config.vehicle_proxy, config.dropped_layers()
+            cx, cy = raw.compute_bounds(dropped).center
+            x, y = nearest_free_point(
+                built, cx, cy, math.hypot(vp.length, vp.width) / 2 + 0.1, config.grid_resolution,
+                include_zones=config.include_forbidden_as_collision, dropped_layers=dropped,
+            )
+            vp.pos_x, vp.pos_y = round(x, 3), round(y, 3)
         self.raw, self.built, self.config = raw, built, config
         self.edit_resolution = config.grid_resolution
         self._strokes = []

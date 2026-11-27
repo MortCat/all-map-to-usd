@@ -11,10 +11,11 @@ import cv2
 import numpy as np
 import pytest
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils
+from test_isaac_models import isaac  # noqa: F401  (fixture)
 
 from allmaptousd.exporters.ros_map import export_ros_map_zip
 from allmaptousd.model_assets import ASSET_DIR, import_model, open_model_files, open_model_source
-from allmaptousd.models import BuildConfig, EquipmentPlacement
+from allmaptousd.models import BuildConfig, EquipmentPlacement, IsaacPullConfig, IsaacSimConfig
 from allmaptousd.parsers import MapInputBundle
 from allmaptousd.pipeline import MapSession
 from allmaptousd.web import server
@@ -181,7 +182,7 @@ def test_export_and_project_save_carry_the_files(tmp_path: Path) -> None:
     asset = import_model(open_model_files(_folder_upload(tmp_path / "Crate")), [])
     session = MapSession()
     session.load(MapInputBundle.from_path(
-        Path(__file__).resolve().parents[1] / "sample_maps" / "sample_factory.yaml"))
+        Path(__file__).resolve().parents[1] / "src" / "allmaptousd" / "samples" / "sample_factory.yaml"))
     session.models = {asset.id: asset}
     session.rebuild(_placed(asset))
 
@@ -213,6 +214,32 @@ def test_export_endpoint_zips_usd_with_files(tmp_path: Path, monkeypatch) -> Non
         names = set(zf.namelist())
     assert "Empty_Map.usda" in names and f"{ASSET_DIR}/{asset.id}/Crate/textures/wood.png" in names
     assert (tmp_path / "exports" / ASSET_DIR / asset.id / "Crate" / "textures" / "wood.png").is_file()
+
+
+def test_push_models_only_sends_the_files(isaac, tmp_path: Path) -> None:  # noqa: F811
+    from test_isaac_models import _scene
+
+    _crate(tmp_path / "Crate")
+    asset = import_model(open_model_files(_folder_upload(tmp_path / "Crate")), [])
+    stage = isaac["stage"] = _scene()
+    server.state.session.models = {asset.id: asset}
+    save_dir = tmp_path / "isaac_maps"
+    request = server.IsaacPushRequest(build_config=_placed(asset), isaac_config=IsaacSimConfig(
+        remote_save_dir=str(save_dir), pull=IsaacPullConfig()))
+    result = server.push_models_to_isaac(request)
+    assert result["ok"] and result["count"] == 1, result
+
+    shader = stage.GetPrimAtPath("/World/AGV_Equipment/Crate/Model/Looks/Wood/Tex")
+    texture = shader.GetAttribute("inputs:file").Get()
+    expected = save_dir.resolve() / ASSET_DIR / asset.id / "Crate" / "textures" / "wood.png"
+    assert texture.path == expected.as_posix() and expected.is_file()  # absolute: the scene lives elsewhere
+    mdl = stage.GetPrimAtPath("/World/AGV_Equipment/Crate/Model/Looks/Blue/Shader")
+    assert mdl.GetAttribute("info:mdl:sourceAsset").Get().path == "OmniPBR.mdl"  # Isaac Sim's own
+
+    # File transfer mode copies them the same way.
+    request.isaac_config.transfer_mode = "file"
+    (expected).unlink()
+    assert server.push_models_to_isaac(request)["ok"] and expected.is_file()
 
 
 def test_export_to_a_chosen_folder_and_name(tmp_path: Path, monkeypatch) -> None:

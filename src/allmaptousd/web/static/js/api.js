@@ -111,7 +111,7 @@ function applyMapPayload(payload, shouldFit = true, newSource = null, { preserve
     updateIsaacPullRange();
   }
 
-  ["rebuildBtn", "exportUsdBtn", "exportUsdaBtn", "saveMapBtn", "pushIsaacBtn"].forEach((id) => {
+  ["rebuildBtn", "exportUsdBtn", "exportUsdaBtn", "saveMapBtn", "pushIsaacBtn", "pushModelsBtn"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.disabled = false;
   });
@@ -248,6 +248,8 @@ function collectIsaacConfig() {
     port: parseInt(document.getElementById("isaacPort").value, 10) || 8226,
     target_prim_path: document.getElementById("isaacPrim").value.trim() || "/World/AGV_Map",
     push_mode: document.getElementById("isaacPushMode").value || "reference",
+    equipment_prim_path: document.getElementById("isaacModelsPrim").value.trim() || "/World/AGV_Equipment",
+    equipment_floor: document.getElementById("isaacModelFloor").value || "auto",
     pull: isaacPullRange(pull) ? pull : isaacConfigBase.pull,
   };
 }
@@ -316,8 +318,11 @@ async function pullFromIsaac() {
       const skipped = meta.isaac_unsupported_prims ? ` · ${meta.isaac_unsupported_prims} unsupported geometry skipped` : "";
       const coarsened = data.metadata.resolution > meta.isaac_requested_resolution_m
         ? ` · grid coarsened to ${data.metadata.resolution} m` : "";
+      const models = meta.isaac_restored_models ? ` · ${meta.isaac_restored_models} placed models restored` : "";
+      const unknown = meta.isaac_unknown_models
+        ? ` · ${meta.isaac_unknown_models} placed models pulled as obstacles (import their 3D models first to move them)` : "";
       showToast("Isaac Sim map loaded");
-      return `Pulled ${meta.isaac_projected_prims} obstacle prims from ${data.metadata.name}${skipped}${coarsened}`;
+      return `Pulled ${meta.isaac_projected_prims} obstacle prims from ${data.metadata.name}${models}${unknown}${skipped}${coarsened}`;
     }, "Pull from Isaac Sim failed",
   ));
 }
@@ -329,6 +334,19 @@ function testIsaac() {
     if (!data.reachable) throw new Error(data.message);
     return data.message;
   });
+}
+
+function pushModelsToIsaac() {
+  const cfg = collectIsaacConfig();
+  return runMapRequest(() => runIsaacAction(
+    "pushModelsBtn", "Pushing…", `Writing the placed models into ${cfg.equipment_prim_path} on ${cfg.host}:${cfg.port}…`,
+    async () => {
+      const data = await isaacMapRequest("push-models", cfg);
+      if (!data.ok) throw new Error(data.message || "Push failed.");
+      showToast(data.count ? `Models written into ${data.mounted_prim}` : `Removed ${data.mounted_prim}`);
+      return data.message;
+    }, "Push Models Only failed",
+  ));
 }
 
 function pushToIsaac() {

@@ -17,16 +17,43 @@ if str(SRC) not in sys.path:
 
 import uvicorn  # noqa: E402
 
-from allmaptousd.web.server import app  # noqa: E402
+from allmaptousd.web import server as web_server  # noqa: E402
+
+_ANY_INTERFACE = {"0.0.0.0", "::", ""}
+_STARTUP_TIMEOUT_SEC = 15.0
 
 
-def _find_free_port(preferred: int = 8765) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if s.connect_ex(("127.0.0.1", preferred)) != 0:
-            return preferred
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+def _family(host: str) -> socket.AddressFamily:
+    return socket.AF_INET6 if ":" in host else socket.AF_INET
+
+
+def _find_free_port(host: str, preferred: int = 8765) -> int:
+    """``preferred`` unless something already answers there or it cannot be bound on ``host``."""
+    probe = "127.0.0.1" if host in _ANY_INTERFACE else host
+    with socket.socket(_family(probe), socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        in_use = s.connect_ex((probe, preferred)) == 0
+    with socket.socket(_family(host), socket.SOCK_STREAM) as s:
+        try:
+            if in_use:
+                raise OSError
+            s.bind((host, preferred))
+        except OSError:
+            s.bind((host, 0))
         return int(s.getsockname()[1])
+
+
+def _start_server(server: uvicorn.Server) -> threading.Thread:
+    """Run uvicorn in the background and return once it accepts connections."""
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + _STARTUP_TIMEOUT_SEC
+    while not server.started:
+        if not thread.is_alive() or time.monotonic() > deadline:
+            server.should_exit = True
+            raise SystemExit(f"AllMapToUSD server did not start on {server.config.host}:{server.config.port}.")
+        time.sleep(0.05)
+    return thread
 
 
 def main() -> None:
@@ -45,20 +72,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    port = _find_free_port(args.port)
-    url = f"http://{args.host}:{port}"
+    port = _find_free_port(args.host, args.port)
+    # Accept requests addressed to the bound host too; on every interface any name has to be allowed.
+    web_server.ALLOWED_HOSTS.add("*" if args.host in _ANY_INTERFACE else args.host)
+    browse_host = "127.0.0.1" if args.host in _ANY_INTERFACE else args.host
+    url = f"http://[{browse_host}]:{port}" if ":" in browse_host else f"http://{browse_host}:{port}"
 
     if args.headless:
         print(f"AllMapToUSD server running at {url}")
-        uvicorn.run(app, host=args.host, port=port, log_level="info")
+        uvicorn.run(web_server.app, host=args.host, port=port, log_level="info")
         return
 
     server = uvicorn.Server(
-        uvicorn.Config(app, host=args.host, port=port, log_level="warning")
+        uvicorn.Config(web_server.app, host=args.host, port=port, log_level="warning")
     )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    time.sleep(0.6)
+    thread = _start_server(server)
 
     if args.browser:
         print(f"Opening AllMapToUSD in browser: {url}")

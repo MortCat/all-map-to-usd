@@ -14,11 +14,11 @@ Convert AGV/AMR navigation maps into simulation-ready OpenUSD obstacle layouts. 
 4. Export **.usd** (binary) or **.usda** (text). A **Save As** window asks where to save the file and what to call it. It suggests the map name and opens in the folder of the last export, or **exports/** the first time. You can set the output origin and heading and include stations, routes, and an AGV proxy. Export works offline.
 5. Click **Save Map (ROS .zip)** to keep your work. The zip is a standard ROS / Nav2 map (YAML + PGM) of the obstacles. It also stores the forbidden zones, stations, routes, build settings, and AGV pose. Drop it into **Map Source** to reopen the map where you left off.
 
-If setup fails, check **setup.log** and rerun with `start_app.cmd --force-setup`. The app writes to **app.log**.
+If setup fails, check **setup.log** and rerun with `start_app.cmd --force-setup`. The app writes to **app.log**. A source checkout keeps exports and settings in the project folder. A pip install keeps them in **~/AllMapToUSD**. Set `ALLMAPTOUSD_HOME` to use another folder.
 
 ## Edit a map
 
-Load a map or choose **Empty Map** in **Map Source** and set its width, height, and grid resolution. Open **Edit** next to **Ruler** to draw obstacle points, lines, or outlined and filled rectangles. Use **Eraser** to remove drawn or imported obstacles. Click it again to switch to **Box Eraser**, then drag a box to erase the obstacles inside it. Drag with the middle or right mouse button to pan.
+Load a map or choose **Empty Map** in **Map Source** and set its width, height, and grid resolution. Open **Edit** next to **Ruler** to draw obstacle points, lines, or outlined and filled rectangles. Use **Eraser** to remove drawn or imported obstacles. Click **Eraser** again to switch to **Box Eraser**, then drag a box to erase every obstacle inside it. Click it once more to return to the brush eraser. Placed 3D models are not erased. Drag with the middle or right mouse button to pan.
 
 Each completed stroke updates the collision preview and the geometry used for USD export and Isaac Sim. With **Fill Solid Loops** enabled, imported obstacles, brush and line strokes, and rectangle outlines can form a closed boundary together. Small edited pockets with entrances too narrow for the AGV can also be filled. This check uses a disk based on the smaller AGV dimension and respects **Max Fill Area (m²)** and eraser openings. Use **Filled** for a rectangle that is solid regardless of the loop settings. Click **Rebuild Obstacles** after changing these settings or the AGV dimensions.
 
@@ -62,13 +62,25 @@ Use **Auto Detect** or select the format in **Map Source**. For reconstruction, 
 
 Pull reads the active USD stage at its current timeline position, accounts for stage units and up axis, and leaves the stage untouched. It uses polygon meshes, analytic shapes such as cubes and cylinders, and geometry inside USD references and native instances. It samples their geometry rather than running a physics or LiDAR simulation. Point instancers and other unsupported geometry are reported in the sync status. The initial build uses exact grid rectangles with noise cleanup disabled to preserve the projected cells.
 
+### Add models to an existing scene
+
+To lay out equipment in a scene that is already open in Isaac Sim, without touching its walls:
+
+1. Click **Pull from Isaac Sim** to load the scene as a map. Its coordinates are the scene's world coordinates in meters.
+2. Place 3D models with the **Model** edit tool.
+3. Click **Push Models Only**. The placed models are copied into the open scene under **Models Prim** (default `/World/AGV_Equipment`). Each push replaces that prim, so moving or deleting a model and pushing again updates the scene. Nothing is referenced, so saving the scene in Isaac Sim keeps the models. Their textures and materials are saved in `~/allmaptousd_maps/allmaptousd_assets` on the Isaac host, the folder where pushed maps go, and the scene points at them there by full path, so keep that folder.
+
+**Model Floor** sets what the models stand on. **Auto** looks straight down under each model, from 1 m below to 0.5 m above the **Floor Elevation**, and uses the highest surface it finds there. A model with no surface under it stands at the floor elevation. Select **Floor Elevation** to put every model at that height.
+
+A later **Pull from Isaac Sim** brings the pushed models back as movable models rather than obstacles, as long as their 3D models are still in the tray. This also applies to models from **Push to Isaac Sim**. A model that is no longer in the tray is pulled as an obstacle. The app refuses to replace a **Models Prim** that holds prims it did not write.
+
 ## Command line
 
 Install the package in your active Python environment with `python -m pip install -e .`, then convert the bundled sample from the project root.
 
 ```powershell
 allmaptousd formats
-allmaptousd convert sample_maps/sample_factory.yaml -o factory.usd
+allmaptousd convert src/allmaptousd/samples/sample_factory.yaml -o factory.usd
 allmaptousd convert --help
 ```
 

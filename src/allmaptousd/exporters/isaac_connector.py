@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import atexit
 import base64
-import gzip
 import json
 import os
 import re
@@ -24,7 +23,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from allmaptousd.model_assets import write_tree
+from allmaptousd.exporters.usd_exporter import EQUIPMENT_LAYER_ROOT
+from allmaptousd.model_assets import ASSET_DIR, write_tree
 from allmaptousd.models import IsaacSimConfig
 
 _LOCAL_HOSTS = ("", "127.0.0.1", "localhost", "::1")
@@ -173,15 +173,35 @@ def _last_json_line(resp: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def build_pull_script(cfg: IsaacSimConfig, low: float, high: float) -> str:
-    """Run the projection against the active stage without authoring any USD changes."""
-    projection = Path(__file__).with_name("usd_slice.py").read_text(encoding="utf-8")
-    arguments = (
-        cfg.pull.root_prim_path, cfg.pull.exclude_prim_path, low, high, cfg.pull.geometry == "collision_only",
-    )
-    return projection + f"""
+def _isaac_modules() -> str:
+    """``usd_slice.py`` followed by ``isaac_equipment.py``, as one block of python_server source."""
+    here = Path(__file__).parent
+    slice_source = here.joinpath("usd_slice.py").read_text(encoding="utf-8")
+    return slice_source + "\n\n" + here.joinpath("isaac_equipment.py").read_text(encoding="utf-8")
 
-import base64, gzip, json
+
+def build_pull_script(
+    cfg: IsaacSimConfig,
+    low: float,
+    high: float,
+    resolution: float,
+    known_models: list[str] | tuple[str, ...] = (),
+) -> str:
+    """Run the projection against the active stage without authoring any USD changes.
+
+    Placed 3D models whose model the app has loaded (``known_models``) are left out of the slice and
+    returned as poses instead, so they come back as movable models."""
+    arguments = (
+        cfg.pull.root_prim_path,
+        cfg.pull.exclude_prim_path,
+        low,
+        high,
+        cfg.pull.geometry == "collision_only",
+        resolution,
+    )
+    return _isaac_modules() + f"""
+
+import json
 import omni.timeline
 import omni.usd
 
@@ -191,19 +211,33 @@ def _pull_stage():
         raise ValueError("No active stage in Isaac Sim.")
     seconds = omni.timeline.get_timeline_interface().get_current_time()
     time = Usd.TimeCode(seconds * stage.GetTimeCodesPerSecond())
-    result = collect_stage_slice(stage, time, *{arguments!r})
-    data = json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    print(json.dumps({{"stage_slice": base64.b64encode(gzip.compress(data, compresslevel=3)).decode("ascii")}}))
+    equipment, unknown = find_equipment(stage, time, {cfg.pull.root_prim_path!r}, {sorted(known_models)!r})
+    result = collect_stage_slice(stage, time, *{arguments!r}, skip_paths=[e["path"] for e in equipment])
+    result["equipment"] = equipment
+    result["unknown_equipment"] = unknown
+    # The grid inside is already zlib-compressed, so the reply is a single small JSON line.
+    print(json.dumps({{"stage_slice": result}}, separators=(",", ":"), allow_nan=False))
 
 _pull_stage()
 """
 
 
-def pull_stage_slice(cfg: IsaacSimConfig, low: float, high: float) -> dict[str, Any]:
+def pull_stage_slice(
+    cfg: IsaacSimConfig,
+    low: float,
+    high: float,
+    resolution: float,
+    known_models: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Read the stage slice over the same direct or SSH connection used by Push."""
     try:
         host, port, _ = _resolve_endpoint(cfg)
-        reply = send_python_cell(host, port, build_pull_script(cfg, low, high), timeout=cfg.timeout_sec)
+        reply = send_python_cell(
+            host,
+            port,
+            build_pull_script(cfg, low, high, resolution=resolution, known_models=known_models),
+            timeout=max(cfg.timeout_sec, 60.0),
+        )
     except OSError as exc:
         raise RuntimeError(f"Cannot pull from Isaac Sim ({cfg.host}:{cfg.port}): {exc}") from exc
     if reply.get("status") == "error":
@@ -212,12 +246,11 @@ def pull_stage_slice(cfg: IsaacSimConfig, low: float, high: float) -> dict[str, 
             raise ValueError(error)
         raise RuntimeError(f"Isaac Sim pull failed: {error}")
     try:
-        payload = _last_json_line(reply)["stage_slice"]
-        data = json.loads(gzip.decompress(base64.b64decode(payload, validate=True)))
-        if not isinstance(data, dict) or not {"stage", "prim_count", "projected", "sections"} <= data.keys():
+        data = _last_json_line(reply)["stage_slice"]
+        if not isinstance(data, dict) or not {"stage", "prim_count", "unsupported"} <= data.keys():
             raise ValueError("Invalid stage projection")
         return data
-    except (KeyError, OSError, EOFError, TypeError, ValueError) as exc:
+    except (KeyError, ValueError) as exc:
         raise RuntimeError("Isaac Sim did not return a valid stage projection.") from exc
 
 
@@ -532,3 +565,102 @@ def push_usd_to_isaac(
 # How far the automatic floor search looks around the Floor Elevation setting (metres).
 FLOOR_SEARCH_BELOW_M = 1.0
 FLOOR_SEARCH_ABOVE_M = 0.5
+
+
+def build_equipment_push_script(
+    layer_text: str | None,
+    file_name: str,
+    cfg: IsaacSimConfig,
+    samples: list[list[list[float]]],
+    files: dict[str, bytes] | None = None,
+) -> str:
+    """Python cell that writes the placed models into the open scene (a copy, not a reference).
+
+    With ``layer_text`` the models layer travels inside the cell (zlib + base64) along with ``files``
+    (the models' textures etc.); with ``None`` they are already in ``remote_save_dir`` (see
+    deliver_files). The copied models point at those files by absolute path."""
+    floor = float(cfg.pull.floor_elevation_m)
+    search = (floor - FLOOR_SEARCH_BELOW_M, floor + FLOOR_SEARCH_ABOVE_M)
+    if layer_text is not None:
+        packed = base64.b64encode(zlib.compress(layer_text.encode("utf-8"), 6)).decode("ascii")
+        load = (
+            "    _source = Sdf.Layer.CreateAnonymous('.usda')\n"
+            f"    _source.ImportFromString(zlib.decompress(base64.b64decode({packed!r})).decode('utf-8'))"
+        )
+    else:
+        save_dir = cfg.remote_save_dir
+        load = (
+            f"    _path = (Path(os.path.expanduser({save_dir!r})) / {file_name!r}).resolve().as_posix()\n"
+            "    _source = Sdf.Layer.FindOrOpen(_path)\n"
+            "    if _source is None:\n"
+            "        raise ValueError(f'Models file not found on the Isaac host: {_path}')\n"
+            "    _source.Reload(force=True)"
+        )
+    skip = [p for p in (cfg.pull.exclude_prim_path.strip(), cfg.target_prim_path.strip()) if p]
+    arguments = (cfg.equipment_prim_path, floor, cfg.equipment_floor == "auto", search, skip, samples)
+    packed = _pack_files(files if layer_text is not None else None)
+    helper = _WRITE_FILES if packed else ""
+    write_files = f"_write_files(save_dir, {packed!r})" if packed else "pass"
+    return _isaac_modules() + f"""
+
+import base64, json, os, zlib
+from pathlib import Path
+import omni.usd
+
+{helper}
+
+def _push_models():
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise ValueError("No scene is open in Isaac Sim. Open the scene first, then push the models.")
+    save_dir = Path(os.path.expanduser({cfg.remote_save_dir!r})).resolve()
+    {write_files}
+{load}
+    target, floor, auto, search, skip, samples = {arguments!r}
+    result = place_equipment(stage, Usd.TimeCode.Default(), _source, {EQUIPMENT_LAYER_ROOT!r}, target, floor,
+                             auto, search, skip, samples, {f"./{ASSET_DIR}/"!r}, save_dir.as_posix())
+    print(json.dumps({{"equipment_push": result}}, separators=(",", ":")))
+
+_push_models()
+"""
+
+
+def push_equipment_to_isaac(
+    layer_text: str,
+    map_name: str,
+    cfg: IsaacSimConfig,
+    samples: list[list[list[float]]],
+    files: dict[str, bytes] | None = None,
+) -> dict[str, Any]:
+    """Write only the placed 3D models (and ``files``, their textures etc.) into the scene open in Isaac Sim."""
+    file_name = f"{_sanitize_filename(map_name)}_models.usda"
+    failure, resp, transport, delivery = _deliver_and_run(
+        cfg, {file_name: layer_text.encode("utf-8"), **(files or {})},
+        lambda inline: build_equipment_push_script(layer_text if inline else None, file_name, cfg, samples, files),
+        max(cfg.timeout_sec, 60.0),
+    )
+    if failure:
+        return failure
+    result = _last_json_line(resp).get("equipment_push")
+    if not isinstance(result, dict):
+        return {"ok": False, "message": "Isaac Sim did not confirm the models push."}
+
+    count, floors = int(result.get("count", 0)), result.get("floors") or []
+    prim = result.get("mounted_prim", cfg.equipment_prim_path)
+    via = " (SSH Tunnel)" if transport == "ssh_tunnel" else ""
+    elevation = f"{cfg.pull.floor_elevation_m:g} m"
+    if not count:
+        message = f"No models are placed, so {prim} was removed on {cfg.host}{via}"
+    else:
+        found = [z for z in floors if z is not None]
+        if cfg.equipment_floor != "auto":
+            floor_note = f"standing at the floor elevation {elevation}"
+        elif len(found) == count:
+            floor_note = f"floor found under every model (z {min(found):g} to {max(found):g} m)"
+        else:
+            floor_note = f"floor found under {len(found)} of {count}; the others stand at {elevation}"
+        message = f"Wrote {count} model{'s' * (count != 1)} into {prim} on {cfg.host}{via} · {floor_note}"
+    return {
+        "ok": True, "transport": transport, "delivery": delivery, "mounted_prim": prim,
+        "count": count, "floors": floors, "message": message,
+    }

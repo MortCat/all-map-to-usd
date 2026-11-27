@@ -581,6 +581,27 @@ def test_ros_negate_and_origin_yaw(tmp_path: Path) -> None:
     assert rotated.points[0] == pytest.approx([1.0 - 0.95, 2.0 + 0.25])
 
 
+def test_agv_starts_clear_of_obstacles_near_map_centre() -> None:
+    import cv2
+
+    from allmaptousd.pipeline import MapSession
+
+    sample = Path(__file__).resolve().parents[1] / "src" / "allmaptousd" / "samples" / "sample_factory.yaml"
+    session = MapSession()
+    built = session.load(MapInputBundle.from_path(sample))
+    vp = session.config.vehicle_proxy
+    pos = np.array([vp.pos_x, vp.pos_y])
+    centre = np.array(built.compute_bounds().center)
+
+    def distance(poly: np.ndarray) -> float:  # > 0 outside the polygon
+        return -cv2.pointPolygonTest(poly.astype(np.float32).reshape(-1, 1, 2), tuple(map(float, pos)), True)
+
+    boxes = [np.array([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]) for x0, y0, x1, y1 in built.obstacle_boxes]
+    nearest = min(distance(p) for p in [*built.obstacle_polygons, *boxes])
+    assert nearest >= np.hypot(vp.length, vp.width) / 2  # clear at any heading
+    assert np.linalg.norm(pos - centre) < 3.0  # still near the middle of the map
+
+
 def test_triangulation_covers_self_touching_contours() -> None:
     """A cell contour that touches itself along a zero-width bridge must not leave holes in the mesh."""
     from allmaptousd.geometry.reconstruct import _polygon_signed_area, triangulate_polygon
@@ -631,7 +652,7 @@ def test_saved_ros_map_reopens_with_its_settings(tmp_path: Path, monkeypatch, mo
 
     monkeypatch.setattr(web_server, "EXPORT_DIR", tmp_path / "exports")
     client = TestClient(web_server.app, base_url="http://127.0.0.1:8765")
-    sample = Path(__file__).resolve().parents[1] / "sample_maps" / "sample_factory.yaml"
+    sample = Path(__file__).resolve().parents[1] / "src" / "allmaptousd" / "samples" / "sample_factory.yaml"
     raw = create_default_registry().parse(MapInputBundle.from_path(sample))
     raw.forbidden_zones.append(Zone("Keep out", np.array([[1.0, 1.0], [3.0, 1.0], [3.0, 2.5]])))
     raw.stations.append(Station("Charger", 2.0, 3.0, 0.5, "ChargePoint"))

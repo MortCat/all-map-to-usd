@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "allmaptousd"
-version = "1.1.0"
+dynamic = ["version"]
 description = "Unified AGV/AMR map converter to Isaac Sim USD obstacle layouts with 2D clearance inspector and live Isaac Sim stage push."
 license = {text = "MIT"}
 requires-python = ">=3.11"
@@ -29,11 +29,14 @@ desktop = ["pywebview>=5.1"]
 step = ["cadquery-ocp>=7.7,<8"]  # The STEP importer uses the OpenCASCADE 7 label sequence API.
 dev = ["pytest>=8.0", "ruff>=0.6", "httpx>=0.27"]
 
+[tool.setuptools.dynamic]
+version = {attr = "allmaptousd.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-allmaptousd = ["web/static/*.html", "web/static/*.css", "web/static/js/*.js"]
+allmaptousd = ["web/static/*.html", "web/static/*.css", "web/static/js/*.js", "samples/*.yaml", "samples/*.pgm"]
 
 [tool.ruff]
 line-length = 120

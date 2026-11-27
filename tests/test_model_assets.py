@@ -17,7 +17,7 @@ from allmaptousd.parsers import MapInputBundle
 from allmaptousd.pipeline import MapSession
 from allmaptousd.web import server as web_server
 
-SAMPLE = Path(__file__).resolve().parents[1] / "sample_maps" / "sample_factory.yaml"
+SAMPLE = Path(__file__).resolve().parents[1] / "src" / "allmaptousd" / "samples" / "sample_factory.yaml"
 
 
 def _robot_usda(tmp_path: Path) -> bytes:

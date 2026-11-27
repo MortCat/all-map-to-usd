@@ -36,6 +36,8 @@
     document.getElementById("isaacPort").value = cfg.port || 8226;
     document.getElementById("isaacPushMode").value = cfg.push_mode || "reference";
     document.getElementById("isaacPrim").value = cfg.target_prim_path || "/World/AGV_Map";
+    document.getElementById("isaacModelsPrim").value = cfg.equipment_prim_path || "/World/AGV_Equipment";
+    document.getElementById("isaacModelFloor").value = cfg.equipment_floor || "auto";
     if (cfg.pull) {
       document.getElementById("isaacPullRoot").value = cfg.pull.root_prim_path;
       document.getElementById("isaacPullExclude").value = cfg.pull.exclude_prim_path;

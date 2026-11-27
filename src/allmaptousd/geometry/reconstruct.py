@@ -13,6 +13,7 @@ All raster operations (morphology, connected components, cavity filling) run in 
 from __future__ import annotations
 
 import math
+from collections.abc import Collection
 from typing import NamedTuple
 
 import cv2
@@ -525,6 +526,50 @@ def reconstruct_obstacles(
     extra["resolution_was_coarsened"] = eff_res != float(config.grid_resolution)
     extra["reconstruction_mode"] = config.reconstruction_mode
     return canonical
+
+
+_MAX_PLACEMENT_CELLS = 1_000_000
+
+
+def nearest_free_point(
+    canonical: CanonicalMap,
+    x: float,
+    y: float,
+    clearance: float,
+    res: float,
+    *,
+    include_zones: bool = True,
+    dropped_layers: Collection[str] = (),
+) -> tuple[float, float]:
+    """Return the point nearest (x, y) that keeps ``clearance`` from every reconstructed obstacle
+    (and forbidden zone) and from the map edge. Returns (x, y) itself when it is already clear or
+    when the map has no such point."""
+    shapes = [*canonical.obstacle_polygons, *(z.vertices for z in canonical.forbidden_zones if include_zones)]
+    shapes += [np.array([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]) for x0, y0, x1, y1 in canonical.obstacle_boxes]
+    if not shapes:
+        return x, y
+    bounds = canonical.compute_bounds(dropped_layers)
+    res = max(res, math.sqrt(bounds.width * bounds.height / _MAX_PLACEMENT_CELLS))
+    origin = np.array([bounds.min_x, bounds.min_y])
+    # Pixel (row, col) is centred on origin + (col, row) * res; 0 = blocked, 255 = free.
+    free = np.full((math.ceil(bounds.height / res) + 1, math.ceil(bounds.width / res) + 1), 255, np.uint8)
+    for shape in shapes:
+        if len(shape) >= 3:  # one at a time: fillPoly cancels out overlapping polygons
+            cv2.fillPoly(free, [np.rint((shape - origin) / res * 256).astype(np.int32)], 0, shift=8)
+    free[[0, -1], :] = 0
+    free[:, [0, -1]] = 0
+    # Distances run between pixel centres, so allow one extra cell for the obstacle's true edge.
+    clear = cv2.distanceTransform(free, cv2.DIST_L2, 5) * res >= clearance + res
+
+    col, row = np.rint((np.array([x, y]) - origin) / res).astype(int)
+    if 0 <= row < clear.shape[0] and 0 <= col < clear.shape[1] and clear[row, col]:
+        return x, y
+    rows, cols = np.nonzero(clear)
+    if not len(rows):
+        return x, y
+    nearest = np.argmin((cols - col) ** 2 + (rows - row) ** 2)
+    px, py = origin + np.array([cols[nearest], rows[nearest]]) * res
+    return float(px), float(py)
 
 
 # ---------------------------------------------------------------------------

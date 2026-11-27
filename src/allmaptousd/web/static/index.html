@@ -343,6 +343,7 @@
             <button class="btn secondary" id="pushIsaacBtn" onclick="pushToIsaac()" disabled>Push to Isaac Sim</button>
             <button class="btn secondary" id="pullIsaacBtn" onclick="pullFromIsaac()" title="Replace the canvas with a snapshot of the active stage">Pull from Isaac Sim</button>
           </div>
+          <button class="btn secondary" id="pushModelsBtn" onclick="pushModelsToIsaac()" disabled title="Write only the placed 3D models into the scene open in Isaac Sim, as copies. Walls and other scene content are not changed.">Push Models Only</button>
           <p id="isaacPullRange" class="isaac-pull-range"></p>
           <div id="isaacStatus" class="action-status" role="status"></div>
           <div class="grid-2">
@@ -356,6 +357,17 @@
             <label class="field">
               <span class="field-label">Push Target Prim</span>
               <input id="isaacPrim" type="text" value="/World/AGV_Map" />
+            </label>
+            <label class="field">
+              <span class="field-label">Models Prim</span>
+              <input id="isaacModelsPrim" type="text" value="/World/AGV_Equipment" title="Push Models Only replaces this prim with the placed models" />
+            </label>
+            <label class="field">
+              <span class="field-label">Model Floor</span>
+              <select id="isaacModelFloor" title="Push Models Only: Auto stands each model on the surface found under it (within 1 m below to 0.5 m above Floor Elevation); Floor Elevation puts every model at that height">
+                <option value="auto">Auto</option>
+                <option value="floor_elevation">Floor Elevation</option>
+              </select>
             </label>
             <label class="field">
               <span class="field-label">Pull Source Prim</span>

@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
+from allmaptousd.exporters.isaac_equipment import TAG
 from allmaptousd.geometry.reconstruct import triangulate_polygon
 from allmaptousd.model_assets import ModelAsset, add_model_copy, write_tree
 from allmaptousd.models import BuildConfig, CanonicalMap
@@ -251,7 +252,8 @@ def _add_navigation(stage: Usd.Stage, canonical: CanonicalMap, material: UsdShad
 def _add_equipment(
     stage: Usd.Stage, config: BuildConfig, models: Mapping[str, ModelAsset], root: str = "/World/Map/Equipment",
 ) -> None:
-    """Copy the prims of each placed 3D model into the exported stage."""
+    """Placed 3D models, each a full copy of its prims (the source file is not referenced). Each one is
+    tagged with ``customData["allmaptousd"]`` so Pull from Isaac Sim can bring it back as a model."""
     if not config.equipment:
         return
     UsdGeom.Xform.Define(stage, root)
@@ -267,7 +269,14 @@ def _add_equipment(
         api = UsdGeom.XformCommonAPI(xf)
         api.SetTranslate(Gf.Vec3d(float(item.x), float(item.y), 0.0))
         api.SetRotate(Gf.Vec3f(0.0, 0.0, float(item.yaw_deg)))
+        prim = xf.GetPrim()
+        prim.SetCustomDataByKey(f"{TAG}:model_id", asset.id)
+        prim.SetCustomDataByKey(f"{TAG}:name", item.name)
+        prim.SetCustomDataByKey(f"{TAG}:model", asset.name)
         add_model_copy(stage, f"{path}/Model", asset)
+
+
+EQUIPMENT_LAYER_ROOT = "/Equipment"
 
 
 def placed_model_files(config: BuildConfig, models: Mapping[str, ModelAsset]) -> dict[str, bytes]:
@@ -278,6 +287,39 @@ def placed_model_files(config: BuildConfig, models: Mapping[str, ModelAsset]) ->
         if model_id in models:
             files.update(models[model_id].package_files())
     return files
+
+
+def export_equipment_usda(config: BuildConfig, models: Mapping[str, ModelAsset]) -> str:
+    """Only the placed 3D models (USDA text), under ``/Equipment`` in the map's output frame (Z up,
+    metres), for writing into an existing Isaac Sim scene."""
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = _framed_xform(stage, EQUIPMENT_LAYER_ROOT, config)
+    root.SetCustomDataByKey("allmaptousd:equipment_root", True)
+    stage.SetDefaultPrim(root)
+    _add_equipment(stage, config, models, EQUIPMENT_LAYER_ROOT)
+    return stage.GetRootLayer().ExportToString()
+
+
+def equipment_floor_samples(config: BuildConfig, models: Mapping[str, ModelAsset]) -> list[list[list[float]]]:
+    """Points (output frame, metres) where the floor under each placed model is probed: the model's
+    centre and its top-view outline pulled 15 % towards the centre, at most 25 points per model."""
+    yaw = math.radians(float(config.origin_yaw_deg))
+    to_output = np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]])  # row vectors
+    samples = []
+    for item in config.equipment:
+        asset = models.get(item.model_id)
+        outline = np.vstack(asset.footprint) if asset is not None and asset.footprint else np.zeros((0, 2))
+        if len(outline) > 24:
+            outline = outline[np.linspace(0, len(outline) - 1, 24).astype(int)]
+        local = np.vstack(([0.0, 0.0], outline * 0.85))
+        a = math.radians(float(item.yaw_deg))
+        turn = np.array([[math.cos(a), math.sin(a)], [-math.sin(a), math.cos(a)]])
+        on_map = local @ turn + (float(item.x), float(item.y))
+        output = (on_map - (float(config.origin_x), float(config.origin_y))) @ to_output
+        samples.append(np.round(output, 4).tolist())
+    return samples
 
 
 def _add_vehicle_proxy(stage: Usd.Stage, config: BuildConfig, mats) -> None:

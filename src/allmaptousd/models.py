@@ -244,3 +244,7 @@ class IsaacSimConfig(BaseModel):
     transfer_mode: Literal["auto", "inline", "file"] = "auto"
     inline_limit_mb: float = Field(default=8.0, ge=0.1, le=512.0)
     pull: IsaacPullConfig = Field(default_factory=IsaacPullConfig)
+    # "Push Models Only": where the placed 3D models are written in the open scene, and what they stand
+    # on ("auto": the surface found under each model; "floor_elevation": pull.floor_elevation_m)
+    equipment_prim_path: str = Field(default="/World/AGV_Equipment", pattern=r"^(/[A-Za-z_]\w*)+$", max_length=1024)
+    equipment_floor: Literal["auto", "floor_elevation"] = "auto"

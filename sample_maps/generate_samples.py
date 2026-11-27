@@ -186,6 +186,7 @@ def generate_dxf_sample(out_path: Path) -> Path:
 
 
 if __name__ == "__main__":
-    base = Path(__file__).resolve().parent
+    # The bundled sample ships inside the package so it also works from a regular (non-editable) install.
+    base = Path(__file__).resolve().parents[1] / "src" / "allmaptousd" / "samples"
     generate_ros_sample(base)
     print(f"Generated ROS sample map in {base}")

@@ -20,21 +20,44 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from allmaptousd import __version__
 from allmaptousd.exporters import check_isaac_connection, push_usd_to_isaac
-from allmaptousd.exporters.isaac_connector import pull_stage_slice
+from allmaptousd.exporters.isaac_connector import pull_stage_slice, push_equipment_to_isaac
 from allmaptousd.exporters.ros_map import export_ros_map_zip
+from allmaptousd.exporters.usd_exporter import equipment_floor_samples, export_equipment_usda, placed_model_files
 from allmaptousd.geometry.editing import MapStroke
 from allmaptousd.geometry.isaac_map import map_from_stage_slice
 from allmaptousd.model_assets import ModelSource, import_model, open_model_files, open_model_source, write_tree
-from allmaptousd.models import Bounds2D, BuildConfig, CanonicalMap, IsaacSimConfig, MapMetadata
+from allmaptousd.models import (
+    Bounds2D,
+    BuildConfig,
+    CanonicalMap,
+    EquipmentPlacement,
+    IsaacSimConfig,
+    MapMetadata,
+)
 from allmaptousd.parsers import MapInputBundle
 from allmaptousd.pipeline import MapSession, NoMapLoaded
 
-ROOT_DIR = Path(__file__).resolve().parents[3]
-SAMPLE_DIR = ROOT_DIR / "sample_maps"
-EXPORT_DIR = ROOT_DIR / "exports"
-STATIC_DIR = Path(__file__).resolve().parent / "static"  # index.html, app.css, js/*.js
-ISAAC_CONFIG_FILE = ROOT_DIR / "isaac_config.json"
+PACKAGE_DIR = Path(__file__).resolve().parents[1]
+SAMPLE_DIR = PACKAGE_DIR / "samples"
+STATIC_DIR = PACKAGE_DIR / "web" / "static"  # index.html, app.css, js/*.js
+
+
+def _data_dir() -> Path:
+    """Where exports and settings go: $ALLMAPTOUSD_HOME, else the project root of a source checkout
+    (start_app.cmd keeps exports/ there), else ~/AllMapToUSD for a regular pip install."""
+    if home := os.environ.get("ALLMAPTOUSD_HOME"):
+        return Path(home).expanduser()
+    checkout = PACKAGE_DIR.parents[1]
+    if (checkout / "pyproject.toml").is_file() and (checkout / "src" / "allmaptousd").is_dir():
+        return checkout
+    return Path.home() / "AllMapToUSD"
+
+
+DATA_DIR = _data_dir()
+EXPORT_DIR = DATA_DIR / "exports"
+ISAAC_CONFIG_FILE = DATA_DIR / "isaac_config.json"
 MapRevision = Annotated[str | None, Header()]
 SAMPLES = {
     "ros_factory": {
@@ -126,6 +149,7 @@ class AppState:
 
     def save_isaac_config(self, cfg: IsaacSimConfig) -> None:
         self.isaac_config = cfg
+        ISAAC_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         ISAAC_CONFIG_FILE.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
 
     def payload(self) -> dict:
@@ -165,8 +189,7 @@ class AppState:
 state = AppState()
 
 
-app = FastAPI(title="AllMapToUSD", version="1.1.0")
-
+app = FastAPI(title="AllMapToUSD", version=__version__)
 
 # Host names the UI may be reached under. A web page on another site that rebinds its DNS name to
 # 127.0.0.1 still sends its own name here, so it cannot drive the API (which can run code in Isaac
@@ -434,7 +457,7 @@ def choose_export_path(req: SaveAsRequest, request: Request) -> dict:
     name = safe_filename(req.name.strip()) if req.name.strip() else "map_layout"
     try:
         done = subprocess.run(
-            [sys.executable, "-c", _SAVE_DIALOG, str(start if start.is_dir() else ROOT_DIR), f"{name}.{req.ext}",
+            [sys.executable, "-c", _SAVE_DIALOG, str(start if start.is_dir() else DATA_DIR), f"{name}.{req.ext}",
              f".{req.ext}", _EXPORT_TYPES[req.ext]],
             capture_output=True, text=True, encoding="utf-8", timeout=1800,
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},  # file names in any language
@@ -560,11 +583,46 @@ def push_to_isaac(req: IsaacPushRequest, x_map_revision: MapRevision = None) -> 
     return push_usd_to_isaac(data, name, req.isaac_config, files)
 
 
+@app.post("/api/isaac/push-models")
+def push_models_to_isaac(req: IsaacPushRequest, x_map_revision: MapRevision = None) -> dict:
+    """Write only the placed 3D models into the scene open in Isaac Sim (obstacles stay untouched)."""
+    with state.map_lock:
+        state.check_map_revision(x_map_revision)
+        name = state.session.raw.metadata.name if state.session.raw is not None else "map"
+        models = dict(state.session.models)
+    try:
+        layer = export_equipment_usda(req.build_config, models)
+    except ValueError as exc:  # a placed model that is no longer loaded
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    samples = equipment_floor_samples(req.build_config, models)
+    files = placed_model_files(req.build_config, models)
+    state.save_isaac_config(req.isaac_config)
+    return push_equipment_to_isaac(layer, name, req.isaac_config, samples, files)
+
+
+def _restored_placements(scene: dict, models: dict) -> list[EquipmentPlacement]:
+    """Placed models found in the pulled stage, as placements (their models are loaded in the app)."""
+    placements = []
+    for item in scene.get("equipment") or []:
+        try:
+            yaw = (float(item["yaw_deg"]) + 180.0) % 360.0 - 180.0
+            placement = EquipmentPlacement(
+                model_id=item["model_id"], name=str(item.get("name") or "Model")[:128] or "Model",
+                x=round(float(item["x"]), 4), y=round(float(item["y"]), 4), yaw_deg=round(yaw, 3),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if placement.model_id in models and np.isfinite([placement.x, placement.y]).all():
+            placements.append(placement)
+    return placements[:500]
+
+
 @app.post("/api/isaac/pull")
 def pull_from_isaac(req: IsaacPushRequest, x_map_revision: MapRevision = None) -> dict:
     with state.map_lock:
         state.check_map_revision(x_map_revision)
         revision = state.session.edit_revision
+        known_models = sorted(state.session.models)
     settings = req.isaac_config.pull
     height = req.build_config.vehicle_proxy.height
     if not np.isfinite(height) or height <= settings.floor_clearance_m:
@@ -572,7 +630,13 @@ def pull_from_isaac(req: IsaacPushRequest, x_map_revision: MapRevision = None) -
     low = settings.floor_elevation_m + settings.floor_clearance_m
     high = settings.floor_elevation_m + height
     try:
-        scene = pull_stage_slice(req.isaac_config, low, high)
+        scene = pull_stage_slice(
+            req.isaac_config,
+            low,
+            high,
+            resolution=req.build_config.grid_resolution,
+            known_models=known_models,
+        )
         raw = map_from_stage_slice(scene, req.build_config.grid_resolution, low, high)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -595,5 +659,9 @@ def pull_from_isaac(req: IsaacPushRequest, x_map_revision: MapRevision = None) -
     with state.map_lock:
         state.check_map_revision(revision)
         state.save_isaac_config(req.isaac_config)
-        state.session.use(raw, config=config)
+        # Placed models come back as movable models (the stage frame is the map frame: origin 0).
+        config.equipment = _restored_placements(scene, state.session.models)
+        raw.metadata.extra["isaac_restored_models"] = len(config.equipment)
+        raw.metadata.extra["isaac_unknown_models"] = int(scene.get("unknown_equipment") or 0)
+        state.session.use(raw, config=config, keep_equipment=True)
         return state.payload()
