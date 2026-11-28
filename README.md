@@ -1,101 +1,76 @@
 # AllMapToUSD
 
-Convert AGV/AMR navigation maps into simulation-ready OpenUSD obstacle layouts. Check aisle widths and vehicle clearance in 2D, then export a USD file or push the layout into a live NVIDIA Isaac Sim stage.
+Bring AGV/AMR maps from ROS, SEER, CAD, and image floor plans into NVIDIA Isaac Sim for testing. AllMapToUSD reconstructs obstacles as OpenUSD geometry with colliders, so you can reuse existing maps, draw custom layouts, and check vehicle clearance before running a simulation. Import and position 3D equipment on the same map, then deploy the full layout or just the equipment to an existing scene.
 
-![AllMapToUSD showing a reconstructed ROS map, AGV clearance check, and aisle measurement](docs/images/ui_overview.png)
-
-[Collision and export preview](docs/images/ui_collision_export.png) · [Isaac Sim stage preview](docs/images/isaac_sim_sample.jpg)
+![AllMapToUSD showing a reconstructed ROS map with placed storage racks, AGV clearance, and the Export & Save and Isaac Sim Sync panels](docs/images/ui_overview.png)
 
 ## Quick start
 
-1. On Windows, install Python 3.11+ and double-click **start_app.cmd**. The first launch creates a virtual environment and installs dependencies. Use `start_app.cmd --browser` to open the UI in your default browser.
-2. Drop a map into **Map Source**, or click **Sample: ROS.yaml** to try the bundled example.
-3. Use **Ruler** to measure an aisle. Under **AGV Footprint Collision Check**, enter the vehicle dimensions, drag the footprint, and rotate it with **Q** or **E** to check clearance.
-4. Export **.usd** (binary) or **.usda** (text). A **Save As** window asks where to save the file and what to call it. It suggests the map name and opens in the folder of the last export, or **exports/** the first time. You can set the output origin and heading and include stations, routes, and an AGV proxy. Export works offline.
-5. Click **Save Map (ROS .zip)** to keep your work. The zip is a standard ROS / Nav2 map (YAML + PGM) of the obstacles. It also stores the forbidden zones, stations, routes, build settings, and AGV pose. Drop it into **Map Source** to reopen the map where you left off.
+1. On Windows, install Python 3.11+ and run `start_app.cmd`. The first launch installs the dependencies. Use `start_app.cmd --browser` to open the app in your browser.
+2. In **Map Source**, drop in a map, try **Sample: ROS.yaml**, or choose **Empty Map** to draw a layout from scratch.
+3. Use **Ruler** to measure clearances and **AGV Footprint Collision Check** to test a vehicle pose. Then save an editable project, export OpenUSD, or send the layout directly to Isaac Sim.
 
-If setup fails, check **setup.log** and rerun with `start_app.cmd --force-setup`. The app writes to **app.log**. A source checkout keeps exports and settings in the project folder. A pip install keeps them in **~/AllMapToUSD**. Set `ALLMAPTOUSD_HOME` to use another folder.
+## Load or draw a test map
 
-## Edit a map
-
-Load a map or choose **Empty Map** in **Map Source** and set its width, height, and grid resolution. Open **Edit** next to **Ruler** to draw obstacle points, lines, or outlined and filled rectangles. Use **Eraser** to remove drawn or imported obstacles. Click **Eraser** again to switch to **Box Eraser**, then drag a box to erase every obstacle inside it. Click it once more to return to the brush eraser. Placed 3D models are not erased. Drag with the middle or right mouse button to pan.
-
-Each completed stroke updates the collision preview and the geometry used for USD export and Isaac Sim. With **Fill Solid Loops** enabled, imported obstacles, brush and line strokes, and rectangle outlines can form a closed boundary together. Small edited pockets with entrances too narrow for the AGV can also be filled. This check uses a disk based on the smaller AGV dimension and respects **Max Fill Area (m²)** and eraser openings. Use **Filled** for a rectangle that is solid regardless of the loop settings. Click **Rebuild Obstacles** after changing these settings or the AGV dimensions.
-
-Use the **Undo** and **Redo** icons next to **Width**, or press **Ctrl+Z** and **Ctrl+Shift+Z**. Press **R** to measure during editing and again to resume drawing. Edits live in the current app session. Use **Save Map (ROS .zip)** to keep them after closing the app or loading another map.
-
-## Place 3D models
-
-Choose **Model** in the **Edit** tools to import equipment from **.usd**, **.usda**, **.usdc**, **.usdz**, **.step**, **.stp**, or **.stl** files. In the import dialog, keep **Whole model** or pick parts from the USD hierarchy or the STEP assembly tree. Check the units and up axis. STL files have no units and default to millimetres. STEP files are read in millimetres. Each model is converted to meters, Z up, and stands on the floor.
-
-STEP import uses OpenCASCADE, a large download. `start_app.cmd` installs it during setup. If that step fails, for example because no build exists for your Python version yet, setup notes it in **setup.log** and the app still runs without STEP. A pip install needs the extra: `python -m pip install "allmaptousd[step]"`. STEP parts keep their colours but not their textures.
-
-A USD model often keeps its textures, materials (`.mdl`), or parts in separate files. To import the whole model, click **Choose Folder** and select the model's folder, or choose a **.zip** of it. A **.usdz** already holds its files. If the folder has more than one model file, pick the right one in **Main file**. The dialog lists any file the model uses that was not uploaded. Materials that come with Isaac Sim, such as `OmniPBR.mdl`, need no file.
-
-Imported models appear as 3D pictures in the tray, in the colours and textures of their materials. Drag a picture onto the map to place the model. Right-drag a picture, or Shift-drag it on a trackpad, to turn it. Drag a placed model to move it. Right-click it to set its yaw or delete it, or press **Delete**. A placed model's top-view outline always counts in the AGV collision check.
-
-USD export and Isaac Sim push copy each placed model's geometry and materials into the file under `/World/Map/Equipment`, with static colliders, so the result does not depend on the source file. The files the models use go in an `allmaptousd_assets` folder next to the USD. **Export USD** saves them side by side in the folder you chose. **Save Map** stores the models, their files, and their positions in the zip.
-
-## Supported maps
-
-| Source | Input | Options |
+| Source | Input | Settings |
 | --- | --- | --- |
-| ROS / ROS 2 Nav2 | YAML + PGM/PNG, or ZIP | Seal unknown boundaries in occupancy grids |
-| SEER Robotics | SMAP or JSON | Import obstacles, no-go zones, stations, and routes |
-| CAD / SICK SMET | DXF | Detect or override drawing units and configure layers and extrusion heights |
-| Raster floor plans / SICK exports | PNG, PGM, BMP, JPEG, TIFF | Set the image resolution in meters per pixel |
+| ROS / ROS 2 Nav2 | YAML with PGM/PNG, or ZIP | Optionally seal unknown boundaries |
+| SEER Robotics | SMAP or JSON | Obstacles, forbidden zones, stations, and routes |
+| CAD / SICK SMET | DXF | Drawing units, layer selection, and obstacle heights |
+| Raster floor plans / SICK exports | PNG, PGM, BMP, JPEG, TIFF | Meters per pixel |
 
-Use **Auto Detect** or select the format in **Map Source**. For reconstruction, **Contour Polygon** follows the obstacle outlines and **Axis-Aligned Grid Merge (AABB)** creates rectangular blocks. **Fill Solid Loops** can also fill small enclosed rooms. Lower the area limit or disable the option to keep those rooms open.
+- In **Edit**, use **Brush**, **Line**, or **Rectangle**. Brush over imported or drawn obstacles with **Eraser**, or click it again for **Box Eraser**. Completed strokes take effect immediately. Use the toolbar's undo and redo icons. Press **R** to use the ruler during editing, and press it again to resume drawing.
+- **Contour Polygon** follows obstacle outlines. **Axis-Aligned Grid Merge (AABB)** produces rectangular blocks. **Fill Solid Loops** can fill small closed regions formed by imported and drawn obstacles together. Adjust **Max Fill Area** to keep larger enclosed spaces open. Click **Rebuild Obstacles** after changing reconstruction settings.
+- Enter the AGV dimensions and safety margin, then drag the footprint and rotate it with **Q** or **E** to check clearance at a specific pose.
 
-## Isaac Sim Sync
+## Place 3D equipment
 
-1. On the Isaac Sim host, enable `isaacsim.code_editor.python_server` when launching Isaac Sim. On Windows, run `.isaac-sim.bat --enable isaacsim.code_editor.python_server` from the Isaac Sim installation directory. On Linux, use the following command.
+1. In **Edit → Model**, import STL, STEP (`.step` or `.stp`), or OpenUSD (`.usd`, `.usda`, `.usdc`, `.usdz`). Import the **Whole model** or select parts from the USD hierarchy or STEP assembly. Check the units and up axis. STL defaults to millimeters.
+2. For USDs with external textures, materials, or parts, use **Choose Folder** or upload a ZIP that preserves their relative paths. If the package contains several USDs, select the **Main file**.
+3. Right-drag a thumbnail or Shift-drag to orbit. Left-drag it onto the map to place it in top view. Drag a placed model to move it, or right-click to set **Yaw** or delete it. Its top-view footprint contributes to the clearance check.
 
-   ```bash
-   ./isaac-sim.sh --enable isaacsim.code_editor.python_server
-   ```
+The Windows launcher attempts to install OpenCASCADE for STEP. If that step fails, see `setup.log`. Other formats remain available. In a source checkout, install STEP support with `python -m pip install -e ".[step]"`.
 
-2. In **Isaac Sim Sync**, enter `127.0.0.1` for a local instance or the address of your remote Linux host. The default port is `8226`. For a remote server bound to loopback, configure key-based SSH so the app can open a tunnel. Click **Test Connection** to check the active stage.
-3. To send the canvas, select **Reference in Current USD** to mount or update the map at `/World/AGV_Map`, or select **Open as New Stage**. Click **Push to Isaac Sim** to frame the map in the active viewport. Reference mode uses the existing stage lights when available.
-4. To read the scene, set **Pull Source Prim** to `/` for the whole stage or enter a subtree such as `/World/Warehouse`. Set **Exclude Prim** to the robot's subtree if needed. Select **Colliders Only** to use enabled USD collision geometries, or keep **Visible or Collidable** to also use visible meshes and shapes.
-5. Set **Floor Elevation** and **Floor Clearance** in meters. Pull projects geometry between floor elevation plus clearance and floor elevation plus the **AGV Height** into editable occupancy cells. For example, with a floor elevation of 0 m, a clearance of 0.02 m, and an AGV height of 0.60 m, the range is 0.02–0.60 m. Click **Pull from Isaac Sim** to replace the canvas after a successful read.
+## Save a project or export USD
 
-Pull reads the active USD stage at its current timeline position, accounts for stage units and up axis, and leaves the stage untouched. It uses polygon meshes, analytic shapes such as cubes and cylinders, and geometry inside USD references and native instances. It samples their geometry rather than running a physics or LiDAR simulation. Point instancers and other unsupported geometry are reported in the sync status. The initial build uses exact grid rectangles with noise cleanup disabled to preserve the projected cells.
+| Action | Result |
+| --- | --- |
+| **Save Map (ROS .zip)** | A ROS / Nav2 occupancy map (YAML + PGM) bundled with project settings, zones, stations, routes, the AGV pose, and the models with their placement and asset files. Drop the ZIP into **Map Source** to resume editing. |
+| **Export .usd** / **Export .usda** | A simulation layout with obstacle and equipment colliders. Keep the `allmaptousd_assets/` folder beside the USD when moving an export with textures or materials. |
 
-### Add models to an existing scene
+Export works offline. Set the output origin and heading in **Export & Save** when the target scene uses a different frame. Use Isaac Sim to configure articulation, control, and sensor behavior for simulated robots.
 
-To lay out equipment in a scene that is already open in Isaac Sim, without touching its walls:
+## Sync with Isaac Sim
 
-1. Click **Pull from Isaac Sim** to load the scene as a map. Its coordinates are the scene's world coordinates in meters.
-2. Place 3D models with the **Model** edit tool.
-3. Click **Push Models Only**. The placed models are copied into the open scene under **Models Prim** (default `/World/AGV_Equipment`). Each push replaces that prim, so moving or deleting a model and pushing again updates the scene. Nothing is referenced, so saving the scene in Isaac Sim keeps the models. Their textures and materials are saved in `~/allmaptousd_maps/allmaptousd_assets` on the Isaac host, the folder where pushed maps go, and the scene points at them there by full path, so keep that folder.
+From the Isaac Sim installation directory, launch Isaac Sim with its Python Server enabled.
 
-**Model Floor** sets what the models stand on. **Auto** looks straight down under each model, from 1 m below to 0.5 m above the **Floor Elevation**, and uses the highest surface it finds there. A model with no surface under it stands at the floor elevation. Select **Floor Elevation** to put every model at that height.
+```powershell
+.\isaac-sim.bat --enable isaacsim.code_editor.python_server
+```
 
-A later **Pull from Isaac Sim** brings the pushed models back as movable models rather than obstacles, as long as their 3D models are still in the tray. This also applies to models from **Push to Isaac Sim**. A model that is no longer in the tray is pulled as an obstacle. The app refuses to replace a **Models Prim** that holds prims it did not write.
+On Linux, use `./isaac-sim.sh --enable isaacsim.code_editor.python_server`. Under **Isaac Sim Sync**, use `127.0.0.1:8226` for a local instance and click **Test Connection**. For a remote Linux host with a loopback-only server, use its host address and configure key-based SSH for the tunnel.
 
-## Command line
+| Action | Use it to |
+| --- | --- |
+| **Push to Isaac Sim** | Select **Reference in Current USD** to mount or update the full map at `/World/AGV_Map` by default. Select **Open as New Stage** to open the exported layout. |
+| **Pull from Isaac Sim** | Replace the canvas with an editable occupancy map from the active stage. Use **Pull Source Prim** and **Exclude Prim** to select the area, and **Colliders Only** to restrict the geometry. |
+| **Push Models Only** | Update the equipment in an existing scene. Pull the scene first to align coordinates, place the models on the canvas, then push them to **Models Prim** (default `/World/AGV_Equipment`). Each push replaces the previous set at that prim. |
 
-Install the package in your active Python environment with `python -m pip install -e .`, then convert the bundled sample from the project root.
+**Pull height range** runs from floor elevation plus **Floor Clearance** to floor elevation plus **AGV Height**. At floor elevation 0 m, clearance 0.02 m, and AGV height 0.60 m, the app projects geometry between 0.02 and 0.60 m onto the map. Pull uses a geometry snapshot at the current timeline position.
+
+**Model Floor** controls equipment placement. **Auto** searches for a surface under each model and falls back to **Floor Elevation**. The default directory for transferred files on the Isaac host is `~/allmaptousd_maps/`. Keep its `allmaptousd_assets/` folder with the deployment. A later pull restores equipment as movable models when their source models are still in the library. If a source model is missing, its geometry in the selected height range is projected as obstacles.
+
+## CLI and development
+
+Install from a source checkout with `python -m pip install -e .`.
 
 ```powershell
 allmaptousd formats
 allmaptousd convert src/allmaptousd/samples/sample_factory.yaml -o factory.usd
-allmaptousd convert --help
 ```
 
-## Development
+For development, install `requirements.txt` in a virtual environment and run `python -m ruff check .` and `python -m pytest`. See the [conversion pipeline](src/allmaptousd/pipeline.py) and [parser interface](src/allmaptousd/parsers/base.py) to add another format.
 
-Install the desktop and development dependencies from `requirements.txt` in a virtual environment, then run the checks.
+For Windows setup issues, check `setup.log` and retry with `start_app.cmd --force-setup`. Application logs are in `app.log`.
 
-```powershell
-python -m pip install -r requirements.txt
-python -m ruff check .
-python -m pytest
-```
-
-The shared [conversion pipeline](src/allmaptousd/pipeline.py) handles parsing, reconstruction, and export. To support another format, implement [MapParser](src/allmaptousd/parsers/base.py) and register it in [create_default_registry()](src/allmaptousd/parsers/__init__.py).
-
-## License
-
-[MIT](LICENSE)
+[MIT License](LICENSE)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "allmaptousd"
 dynamic = ["version"]
-description = "Unified AGV/AMR map converter to Isaac Sim USD obstacle layouts with 2D clearance inspector and live Isaac Sim stage push."
+description = "Convert and edit multi-format AGV/AMR maps, check vehicle clearance, and deploy OpenUSD layouts and 3D equipment to Isaac Sim."
 license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
